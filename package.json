@@ -1,0 +1,29 @@
+{
+  "name": "beekeeper",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "db:generate": "turbo db:generate",
+    "db:migrate:dev": "turbo db:migrate:dev",
+    "db:migrate:deploy": "turbo db:migrate:deploy",
+    "db:migrate:status": "turbo db:migrate:status",
+    "db:seed": "turbo db:seed"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "npm@10.9.0",
+  "dependencies": {
+    "@prisma/client": "^6.19.2"
+  }
+}

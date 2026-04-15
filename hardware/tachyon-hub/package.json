@@ -1,0 +1,19 @@
+{
+  "name": "tachyon-hub",
+  "version": "0.1.0",
+  "description": "BeeKeeper Tachyon hub firmware — BLE scanner, local buffer, HTTPS uploader",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "lint": "node -c src/index.js && node -c src/ble-scanner.js && node -c src/uploader.js && node -c src/config.js && node -c src/buffer.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@abandonware/noble": "^1.9.2-25",
+    "better-sqlite3": "^12.0.0"
+  }
+}

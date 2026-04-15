@@ -1,0 +1,30 @@
+[Unit]
+Description=BeeKeeper Tachyon Hub (BLE scanner + uploader)
+After=network-online.target bluetooth.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=particle
+Group=particle
+WorkingDirectory=/opt/beekeeper-hub
+Environment=NODE_ENV=production
+Environment=BEEKEEPER_API_URL=https://beekeeper-api-production.up.railway.app
+EnvironmentFile=-/etc/beekeeper-hub/env
+ExecStart=/usr/bin/node /opt/beekeeper-hub/src/index.js
+Restart=always
+RestartSec=5
+# Let noble open HCI without full root; requires setcap on node binary:
+#   sudo setcap cap_net_raw+eip $(readlink -f $(which node))
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/beekeeper-hub /etc/beekeeper-hub
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,751 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// V1 MODELS — UNCHANGED (or extended with new relations only)
+// ═══════════════════════════════════════════════════════════════
+
+// ─── Auth & Users ───────────────────────────────────────────
+
+model User {
+  id                  String    @id @default(uuid()) @db.Uuid
+  email               String    @unique
+  name                String?
+  image               String?
+  role                String    @default("spectator") // queen | worker | spectator
+  status              String    @default("active") // active | invited | suspended
+  passwordHash        String?   @map("password_hash")
+  otpHash             String?   @map("otp_hash")
+  otpExpiresAt        DateTime? @map("otp_expires_at")
+  resetTokenHash      String?   @map("reset_token_hash")
+  resetTokenExpiresAt DateTime? @map("reset_token_expires_at")
+  googleId            String?   @unique @map("google_id")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  // V1 relations (unchanged)
+  inspections      Inspection[]
+  feedingLogs      FeedingLog[]
+  healthEvents     HealthEvent[]
+  framePhotos      FramePhoto[]
+  receiptsUploaded Receipt[] // @deprecated — V2 uses ReceiptUpload
+  emailsReceived   EmailLog[]    @relation("EmailRecipient")
+  tasksAssigned    Task[]        @relation("TaskAssignee")
+  tasksCreated     Task[]        @relation("TaskCreator")
+  accounts         Account[]
+  sessions         Session[]
+
+  // V2 relations (new)
+  frameObservations      FrameObservation[]
+  receiptUploads         ReceiptUpload[]
+  receiptReviews         ReceiptReviewQueue[]       @relation("ReceiptReviewer")
+  domainEventsActed      DomainEvent[]
+  auditLogs              AuditLog[]
+  alertsAcknowledged     HiveAlert[]                @relation("AlertAcknowledger")
+  recommendationsActedOn InspectionRecommendation[] @relation("RecommendationActor")
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(uuid()) @db.Uuid
+  userId            String  @map("user_id") @db.Uuid
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(uuid()) @db.Uuid
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id") @db.Uuid
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ─── Apiary & Hives ────────────────────────────────────────
+
+model Apiary {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  address   String?
+  latitude  Float?
+  longitude Float?
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  hives Hive[]
+
+  @@map("apiaries")
+}
+
+model Hive {
+  id             String    @id @default(uuid()) @db.Uuid
+  apiaryId       String    @map("apiary_id") @db.Uuid
+  name           String
+  breed          String?
+  source         String?
+  installDate    DateTime? @map("install_date")
+  queenMarkColor String?   @map("queen_mark_color")
+  status         String    @default("active")
+  notes          String?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  // V1 relations (unchanged)
+  apiary       Apiary          @relation(fields: [apiaryId], references: [id])
+  components   HiveComponent[]
+  inspections  Inspection[]
+  feedingLogs  FeedingLog[]
+  healthEvents HealthEvent[]
+  harvestLogs  HarvestLog[]
+  tasks        Task[]
+
+  // V2 relations (new)
+  alerts          HiveAlert[]
+  anomalies       SensorAnomaly[]
+  recommendations InspectionRecommendation[]
+
+  @@map("hives")
+}
+
+model HiveComponent {
+  id         String   @id @default(uuid()) @db.Uuid
+  hiveId     String   @map("hive_id") @db.Uuid
+  type       String
+  position   Int
+  frameCount Int?     @map("frame_count")
+  notes      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  hive   Hive    @relation(fields: [hiveId], references: [id], onDelete: Cascade)
+  frames Frame[]
+
+  @@map("hive_components")
+}
+
+model Frame {
+  id              String    @id @default(uuid()) @db.Uuid
+  componentId     String    @map("component_id") @db.Uuid
+  position        Int
+  // V1 snapshot columns — kept for backward compat, derived from latest observation
+  frontHoney      Int       @default(0) @map("front_honey")
+  frontBrood      Int       @default(0) @map("front_brood")
+  frontOpen       Int       @default(0) @map("front_open")
+  frontPollen     Int       @default(0) @map("front_pollen")
+  backHoney       Int       @default(0) @map("back_honey")
+  backBrood       Int       @default(0) @map("back_brood")
+  backOpen        Int       @default(0) @map("back_open")
+  backPollen      Int       @default(0) @map("back_pollen")
+  lastInspectedAt DateTime? @map("last_inspected_at")
+  notes           String?
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  // V1 relations
+  component HiveComponent @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  photos    FramePhoto[]
+
+  // V2 relations (new)
+  observations   FrameObservation[]
+  aiObservations FrameAiObservation[]
+
+  @@unique([componentId, position])
+  @@map("frames")
+}
+
+// ─── Inspections & Logs (V1 — unchanged) ───────────────────
+
+model Inspection {
+  id                 String    @id @default(uuid()) @db.Uuid
+  hiveId             String    @map("hive_id") @db.Uuid
+  inspectedBy        String    @map("inspected_by") @db.Uuid
+  inspectedAt        DateTime  @map("inspected_at")
+  weather            String?
+  tempF              Float?    @map("temp_f")
+  queenSeen          Boolean   @default(false) @map("queen_seen")
+  eggsPresent        Boolean   @default(false) @map("eggs_present")
+  larvaePresent      Boolean   @default(false) @map("larvae_present")
+  cappedBrood        Boolean   @default(false) @map("capped_brood")
+  queenCells         Boolean   @default(false) @map("queen_cells")
+  swarmCells         Boolean   @default(false) @map("swarm_cells")
+  layingPattern      String?   @map("laying_pattern")
+  temperament        String?
+  population         String?
+  framesBees         Int?      @map("frames_bees")
+  framesBrood        Int?      @map("frames_brood")
+  framesHoney        Int?      @map("frames_honey")
+  framesPollen       Int?      @map("frames_pollen")
+  diseaseNotes       String?   @map("disease_notes")
+  notes              String?
+  nextInspectionDate DateTime? @map("next_inspection_date")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  // V1 relations
+  hive      Hive         @relation(fields: [hiveId], references: [id])
+  inspector User         @relation(fields: [inspectedBy], references: [id])
+  photos    FramePhoto[]
+
+  // V2 relations (new)
+  frameObservations FrameObservation[]
+
+  @@map("inspections")
+}
+
+model FeedingLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  hiveId     String   @map("hive_id") @db.Uuid
+  fedBy      String   @map("fed_by") @db.Uuid
+  fedAt      DateTime @map("fed_at")
+  feedType   String   @map("feed_type")
+  feederType String?  @map("feeder_type")
+  amountMl   Float?   @map("amount_ml")
+  amountG    Float?   @map("amount_g")
+  notes      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  hive Hive @relation(fields: [hiveId], references: [id])
+  user User @relation(fields: [fedBy], references: [id])
+
+  @@map("feeding_logs")
+}
+
+model HealthEvent {
+  id         String    @id @default(uuid()) @db.Uuid
+  hiveId     String    @map("hive_id") @db.Uuid
+  reportedBy String    @map("reported_by") @db.Uuid
+  eventType  String    @map("event_type")
+  severity   String?
+  treatment  String?
+  notes      String?
+  eventDate  DateTime  @map("event_date")
+  resolvedAt DateTime? @map("resolved_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  hive Hive @relation(fields: [hiveId], references: [id])
+  user User @relation(fields: [reportedBy], references: [id])
+
+  @@map("health_events")
+}
+
+model HarvestLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  hiveId      String   @map("hive_id") @db.Uuid
+  harvestedAt DateTime @map("harvested_at")
+  weightLbs   Float    @map("weight_lbs")
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  hive Hive @relation(fields: [hiveId], references: [id])
+
+  @@map("harvest_logs")
+}
+
+// ─── Frame Photos (V1 — unchanged) ─────────────────────────
+
+model FramePhoto {
+  id             String    @id @default(uuid()) @db.Uuid
+  frameId        String    @map("frame_id") @db.Uuid
+  inspectionId   String?   @map("inspection_id") @db.Uuid
+  hiveId         String?   @map("hive_id") @db.Uuid
+  side           String
+  storageKey     String    @map("storage_key")
+  fileSizeBytes  Int?      @map("file_size_bytes")
+  capturedAt     DateTime  @map("captured_at")
+  aiAnalysisJson Json?     @map("ai_analysis_json") // @deprecated — V2 uses FrameAiObservation
+  aiAnalyzedAt   DateTime? @map("ai_analyzed_at")
+  aiModelVersion String?   @map("ai_model_version")
+  notes          String?
+  uploadedBy     String?   @map("uploaded_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  // V1 relations
+  frame      Frame       @relation(fields: [frameId], references: [id])
+  inspection Inspection? @relation(fields: [inspectionId], references: [id])
+  uploader   User?       @relation(fields: [uploadedBy], references: [id])
+
+  // V2 relations (new)
+  aiObservations FrameAiObservation[]
+
+  @@map("frame_photos")
+}
+
+// ─── Financials (V1 — unchanged, now protected) ────────────
+// These tables are canonical. In V2, they are only written to
+// via approved ReceiptReviewQueue entries or direct human input.
+// AI never writes here directly.
+
+model FinancialTransaction {
+  id          String   @id @default(uuid()) @db.Uuid
+  date        DateTime
+  type        String
+  category    String
+  vendor      String?
+  description String?
+  orderRef    String?  @map("order_ref")
+  subtotal    Float?
+  tax         Float?
+  total       Float
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  lineItems      FinancialLineItem[]
+  receipts       Receipt[] // @deprecated — V2 links via ReceiptReviewQueue.transactionId
+  receiptReviews ReceiptReviewQueue[]
+
+  @@map("financial_transactions")
+}
+
+model FinancialLineItem {
+  id            String  @id @default(uuid()) @db.Uuid
+  transactionId String  @map("transaction_id") @db.Uuid
+  qty           Int?
+  sku           String?
+  description   String
+  unitPrice     Float?  @map("unit_price")
+  amount        Float
+
+  transaction FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@map("financial_line_items")
+}
+
+// @deprecated — V2 uses ReceiptUpload + ReceiptAiExtraction + ReceiptReviewQueue
+// Kept for backward compatibility. No new rows should be written here.
+model Receipt {
+  id             String    @id @default(uuid()) @db.Uuid
+  transactionId  String?   @map("transaction_id") @db.Uuid
+  storageKey     String    @map("storage_key")
+  fileSizeBytes  Int?      @map("file_size_bytes")
+  mimeType       String?   @map("mime_type")
+  uploadedAt     DateTime  @default(now()) @map("uploaded_at")
+  uploadedBy     String?   @map("uploaded_by") @db.Uuid
+  aiAnalysisJson Json?     @map("ai_analysis_json")
+  aiAnalyzedAt   DateTime? @map("ai_analyzed_at")
+  aiModelVersion String?   @map("ai_model_version")
+  aiConfidence   Int?      @map("ai_confidence")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  transaction FinancialTransaction? @relation(fields: [transactionId], references: [id])
+  uploader    User?                 @relation(fields: [uploadedBy], references: [id])
+
+  @@map("receipts")
+}
+
+// ─── Tasks (V1 — unchanged) ───────────────────────────────
+
+model Task {
+  id          String    @id @default(uuid()) @db.Uuid
+  hiveId      String?   @map("hive_id") @db.Uuid
+  title       String
+  description String?
+  status      String    @default("todo")
+  priority    String    @default("medium")
+  assignedTo  String?   @map("assigned_to") @db.Uuid
+  createdBy   String    @map("created_by") @db.Uuid
+  dueDate     DateTime? @map("due_date")
+  completedAt DateTime? @map("completed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  hive     Hive? @relation(fields: [hiveId], references: [id])
+  assignee User? @relation("TaskAssignee", fields: [assignedTo], references: [id])
+  creator  User  @relation("TaskCreator", fields: [createdBy], references: [id])
+
+  @@map("tasks")
+}
+
+// ─── Email Log (V1 — unchanged) ───────────────────────────
+
+model EmailLog {
+  id              String   @id @default(uuid()) @db.Uuid
+  template        String
+  recipientEmail  String   @map("recipient_email")
+  recipientUserId String?  @map("recipient_user_id") @db.Uuid
+  subject         String
+  resendId        String?  @map("resend_id")
+  status          String   @default("sent")
+  metadataJson    Json?    @map("metadata_json")
+  sentAt          DateTime @default(now()) @map("sent_at")
+
+  recipientUser User?       @relation("EmailRecipient", fields: [recipientUserId], references: [id])
+  alerts        HiveAlert[] // V2: alerts that triggered emails
+
+  @@map("email_log")
+}
+
+// ─── Sensor Devices (V1 — extended with V2 relation) ──────
+
+model SensorDevice {
+  id           String   @id @default(uuid()) @db.Uuid
+  hiveId       String?  @map("hive_id") @db.Uuid
+  vendor       String
+  deviceId     String   @map("device_id")
+  name         String?
+  pollInterval Int      @default(60) @map("poll_interval")
+  isActive     Boolean  @default(true) @map("is_active")
+  config       Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // V1 relation (@deprecated)
+  readings SensorReading[]
+
+  // V2 relations (new)
+  rawReadings SensorReadingRaw[]
+  anomalies   SensorAnomaly[]
+
+  @@map("sensor_devices")
+}
+
+// @deprecated — V2 uses SensorReadingRaw
+// Kept for backward compatibility and historical data. No new rows.
+model SensorReading {
+  id         String   @id @default(uuid()) @db.Uuid
+  deviceId   String   @map("device_id") @db.Uuid
+  tempF      Float?   @map("temp_f")
+  humidity   Float?
+  lux        Float?
+  weight     Float?
+  recordedAt DateTime @map("recorded_at")
+
+  device SensorDevice @relation(fields: [deviceId], references: [id])
+
+  @@index([deviceId, recordedAt])
+  @@map("sensor_readings")
+}
+
+// ─── Camera Devices (V1 — unchanged) ──────────────────────
+
+model CameraDevice {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  rtspUrl     String?  @map("rtsp_url")
+  snapshotUrl String?  @map("snapshot_url")
+  isActive    Boolean  @default(true) @map("is_active")
+  config      Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("camera_devices")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// V2 NEW MODELS
+// ═══════════════════════════════════════════════════════════════
+
+// ─── Event Backbone ────────────────────────────────────────
+
+/// Append-only log of all business events in the system.
+/// Never updated, never deleted. The canonical audit trail.
+model DomainEvent {
+  id            String    @id @default(uuid()) @db.Uuid
+  aggregateType String    @map("aggregate_type") // hive | inspection | receipt | sensor | user | task
+  aggregateId   String    @map("aggregate_id") @db.Uuid
+  eventType     String    @map("event_type") // hive.created | inspection.completed | receipt.uploaded | receipt.approved | alert.triggered
+  actorId       String?   @map("actor_id") @db.Uuid
+  actorType     String    @map("actor_type") // user | system | ai | sensor
+  payload       Json? // event-specific data snapshot
+  metadata      Json? // request context (IP, user-agent, correlation ID)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  processedAt   DateTime? @map("processed_at")
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([aggregateType, aggregateId, createdAt])
+  @@index([eventType, createdAt])
+  @@index([actorId, createdAt])
+  // Unprocessed event polling: partial index added via raw SQL in migration
+  // CREATE INDEX ... ON domain_events (created_at) WHERE processed_at IS NULL
+  @@map("domain_events")
+}
+
+/// Structured record of mutations to canonical business tables.
+/// Captures old/new values for full undo capability.
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  tableName String   @map("table_name") // which table was modified
+  recordId  String   @map("record_id") @db.Uuid
+  action    String // create | update | delete | approve | reject
+  actorId   String?  @map("actor_id") @db.Uuid
+  oldValues Json?    @map("old_values") // previous state (null for create)
+  newValues Json?    @map("new_values") // new state (null for delete)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([tableName, recordId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("audit_log_v2")
+}
+
+// ─── Frame Observations ────────────────────────────────────
+
+/// Human observation of a frame at a point in time (both sides in one row).
+/// Linked to an inspection when recorded during one.
+/// Does NOT overwrite Frame — Frame snapshot columns are derived from latest observation.
+/// Nullable coverage fields mean "this side was not observed" (vs 0 = "observed, nothing there").
+model FrameObservation {
+  id           String   @id @default(uuid()) @db.Uuid
+  frameId      String   @map("frame_id") @db.Uuid
+  inspectionId String?  @map("inspection_id") @db.Uuid
+  observedBy   String   @map("observed_by") @db.Uuid
+  observedAt   DateTime @map("observed_at")
+  frontHoney   Int?     @map("front_honey") // 0-100%, null = not observed
+  frontBrood   Int?     @map("front_brood")
+  frontOpen    Int?     @map("front_open")
+  frontPollen  Int?     @map("front_pollen")
+  backHoney    Int?     @map("back_honey")
+  backBrood    Int?     @map("back_brood")
+  backOpen     Int?     @map("back_open")
+  backPollen   Int?     @map("back_pollen")
+  queenSpotted Boolean  @default(false) @map("queen_spotted")
+  notes        String?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  frame      Frame       @relation(fields: [frameId], references: [id])
+  inspection Inspection? @relation(fields: [inspectionId], references: [id])
+  observer   User        @relation(fields: [observedBy], references: [id])
+
+  @@index([frameId, observedAt])
+  @@map("frame_observations")
+}
+
+/// AI analysis of a frame photo. Written by Claude Vision, never by humans.
+/// Linked to the photo it analyzed and the frame it describes.
+/// Does NOT overwrite Frame or FramePhoto — purely observational.
+model FrameAiObservation {
+  id           String   @id @default(uuid()) @db.Uuid
+  frameId      String   @map("frame_id") @db.Uuid
+  photoId      String   @map("photo_id") @db.Uuid
+  modelVersion String   @map("model_version") // claude-sonnet-4-20250514
+  confidence   Int? // 0-100 overall
+  side         String // front | back
+  honey        Int      @default(0)
+  brood        Int      @default(0)
+  openComb     Int      @default(0) @map("open_comb")
+  pollen       Int      @default(0)
+  diseaseFlags Json?    @map("disease_flags") // [{type, confidence, region}]
+  rawResponse  Json?    @map("raw_response") // full AI response for debugging
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  frame Frame      @relation(fields: [frameId], references: [id])
+  photo FramePhoto @relation(fields: [photoId], references: [id])
+
+  @@index([frameId, createdAt])
+  @@index([photoId])
+  @@map("frame_ai_observations")
+}
+
+// ─── Receipt Pipeline ──────────────────────────────────────
+
+/// Stage 1: Raw file upload. No AI, no transaction link.
+model ReceiptUpload {
+  id            String   @id @default(uuid()) @db.Uuid
+  storageKey    String   @map("storage_key") // R2 path
+  fileSizeBytes Int?     @map("file_size_bytes")
+  mimeType      String?  @map("mime_type")
+  originalName  String?  @map("original_name") // user's filename
+  uploadedBy    String   @map("uploaded_by") @db.Uuid
+  uploadedAt    DateTime @default(now()) @map("uploaded_at")
+  status        String   @default("pending") // pending | processing | extracted | failed
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  uploader    User                  @relation(fields: [uploadedBy], references: [id])
+  extractions ReceiptAiExtraction[]
+  reviews     ReceiptReviewQueue[]
+
+  @@index([uploadedBy, createdAt])
+  @@index([status])
+  @@map("receipt_uploads")
+}
+
+/// Stage 2: AI extraction result. One upload can have multiple extractions
+/// (re-scans, different models). Never touches canonical tables.
+model ReceiptAiExtraction {
+  id            String   @id @default(uuid()) @db.Uuid
+  uploadId      String   @map("upload_id") @db.Uuid
+  modelVersion  String   @map("model_version")
+  confidence    Int? // 0-100
+  extractedData Json     @map("extracted_data") // {vendor, date, total, tax, line_items[]}
+  rawResponse   Json?    @map("raw_response") // full AI response for debugging
+  extractionMs  Int?     @map("extraction_ms") // processing time
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  upload  ReceiptUpload        @relation(fields: [uploadId], references: [id])
+  reviews ReceiptReviewQueue[]
+
+  @@index([uploadId])
+  @@index([createdAt])
+  @@map("receipt_ai_extractions")
+}
+
+/// Stage 3: Human review gate. Approved items write to canonical FinancialTransaction.
+model ReceiptReviewQueue {
+  id            String    @id @default(uuid()) @db.Uuid
+  uploadId      String    @map("upload_id") @db.Uuid
+  extractionId  String    @map("extraction_id") @db.Uuid
+  status        String    @default("pending") // pending | approved | rejected | edited
+  reviewedBy    String?   @map("reviewed_by") @db.Uuid
+  reviewedAt    DateTime? @map("reviewed_at")
+  editedData    Json?     @map("edited_data") // human corrections (null if approved as-is)
+  rejectReason  String?   @map("reject_reason")
+  transactionId String?   @map("transaction_id") @db.Uuid // set on approve
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  upload      ReceiptUpload         @relation(fields: [uploadId], references: [id])
+  extraction  ReceiptAiExtraction   @relation(fields: [extractionId], references: [id])
+  reviewer    User?                 @relation("ReceiptReviewer", fields: [reviewedBy], references: [id])
+  transaction FinancialTransaction? @relation(fields: [transactionId], references: [id])
+
+  @@index([status, createdAt])
+  @@index([uploadId])
+  @@index([reviewedBy, createdAt])
+  @@map("receipt_review_queue")
+}
+
+// ─── Sensor Pipeline ───────────────────────────────────────
+
+/// High-frequency raw sensor ingestion. Replaces V1 SensorReading.
+/// Adds battery_pct, signal_rssi, raw_payload for richer diagnostics.
+model SensorReadingRaw {
+  id         String   @id @default(uuid()) @db.Uuid
+  deviceId   String   @map("device_id") @db.Uuid
+  tempF      Float?   @map("temp_f")
+  humidity   Float?
+  lux        Float?
+  weight     Float?
+  batteryPct Int?     @map("battery_pct") // device battery %
+  signalRssi Int?     @map("signal_rssi") // signal strength dBm
+  rawPayload Json?    @map("raw_payload") // vendor-specific raw data
+  recordedAt DateTime @map("recorded_at")
+  ingestedAt DateTime @default(now()) @map("ingested_at")
+
+  device    SensorDevice    @relation(fields: [deviceId], references: [id])
+  anomalies SensorAnomaly[] @relation("TriggeringReading")
+
+  @@index([deviceId, recordedAt])
+  @@index([ingestedAt])
+  @@map("sensor_readings_raw")
+}
+
+/// Detected deviation from normal sensor patterns.
+/// Generated by anomaly detection rules or ML, not by humans.
+model SensorAnomaly {
+  id            String    @id @default(uuid()) @db.Uuid
+  deviceId      String    @map("device_id") @db.Uuid
+  hiveId        String?   @map("hive_id") @db.Uuid
+  anomalyType   String    @map("anomaly_type") // temp_spike | temp_drop | humidity_high | weight_drop | battery_low | signal_lost
+  severity      String // info | warning | critical
+  metric        String // temp_f | humidity | weight | battery_pct
+  expectedValue Float?    @map("expected_value")
+  actualValue   Float?    @map("actual_value")
+  deviationPct  Float?    @map("deviation_pct")
+  windowStart   DateTime? @map("window_start")
+  windowEnd     DateTime? @map("window_end")
+  readingId     String?   @map("reading_id") @db.Uuid // the triggering reading
+  resolvedAt    DateTime? @map("resolved_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  device  SensorDevice      @relation(fields: [deviceId], references: [id])
+  hive    Hive?             @relation(fields: [hiveId], references: [id])
+  reading SensorReadingRaw? @relation("TriggeringReading", fields: [readingId], references: [id])
+
+  @@index([deviceId, createdAt])
+  @@index([hiveId, createdAt])
+  @@index([anomalyType, severity, createdAt])
+  @@map("sensor_anomalies")
+}
+
+// ─── Alerting & Recommendations ────────────────────────────
+
+/// Actionable alert generated from anomalies, inspections, AI, or rules.
+/// The thing that actually notifies a human (email, push, dashboard badge).
+model HiveAlert {
+  id             String    @id @default(uuid()) @db.Uuid
+  hiveId         String    @map("hive_id") @db.Uuid
+  alertType      String    @map("alert_type") // low_feeder | temp_critical | inspection_overdue | swarm_risk | disease_detected | weight_anomaly
+  sourceType     String    @map("source_type") // sensor | inspection | ai | schedule | rule
+  sourceId       String?   @map("source_id") @db.Uuid // FK to anomaly, inspection, observation
+  severity       String // info | warning | critical
+  title          String
+  message        String?
+  status         String    @default("active") // active | acknowledged | resolved | dismissed
+  acknowledgedBy String?   @map("acknowledged_by") @db.Uuid
+  acknowledgedAt DateTime? @map("acknowledged_at")
+  resolvedAt     DateTime? @map("resolved_at")
+  emailSent      Boolean   @default(false) @map("email_sent")
+  emailLogId     String?   @map("email_log_id") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  hive         Hive      @relation(fields: [hiveId], references: [id])
+  acknowledger User?     @relation("AlertAcknowledger", fields: [acknowledgedBy], references: [id])
+  emailLog     EmailLog? @relation(fields: [emailLogId], references: [id])
+
+  @@index([hiveId, status, createdAt])
+  @@index([alertType, status])
+  @@index([status, createdAt])
+  @@map("hive_alerts")
+}
+
+/// AI or rule-generated inspection suggestion.
+/// Humans accept, dismiss, or let them expire. Never auto-executed.
+model InspectionRecommendation {
+  id             String    @id @default(uuid()) @db.Uuid
+  hiveId         String    @map("hive_id") @db.Uuid
+  sourceType     String    @map("source_type") // ai | rule | sensor_pattern
+  sourceId       String?   @map("source_id") @db.Uuid
+  recommendation String
+  reasoning      String?
+  priority       String    @default("medium") // low | medium | high | urgent
+  status         String    @default("pending") // pending | accepted | dismissed | completed
+  actedOnBy      String?   @map("acted_on_by") @db.Uuid
+  actedOnAt      DateTime? @map("acted_on_at")
+  expiresAt      DateTime? @map("expires_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  hive  Hive  @relation(fields: [hiveId], references: [id])
+  actor User? @relation("RecommendationActor", fields: [actedOnBy], references: [id])
+
+  @@index([hiveId, status])
+  @@index([status, expiresAt])
+  @@index([createdAt])
+  @@map("inspection_recommendations")
+}
+
+// ─── Fine-Grained Permissions ──────────────────────────────
+// DEFERRED — not included in V2 initial rollout.
+// Current queen/worker/spectator roles are sufficient.
+// Revisit when one of these becomes real:
+//   - delegated receipt review approval (worker approving AI extractions)
+//   - multi-apiary or scoped per-hive access control
+// Adding a permissions table later is a single additive migration.

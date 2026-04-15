@@ -1,0 +1,728 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Connection pool sizing is controlled via DATABASE_URL query parameters.
+// Prisma's default pool size is (num_cpus * 2 + 1), which is uncontrolled on Railway.
+// Recommended explicit configuration for a Railway single-instance deployment:
+//   DATABASE_URL="postgresql://...?connection_limit=5&pool_timeout=20"
+// connection_limit: max open connections (5 is safe for Railway Hobby; raise for Pro)
+// pool_timeout:     seconds to wait for a free connection before erroring (default: 10)
+// See: https://www.prisma.io/docs/orm/prisma-client/setup-and-configuration/databases-connections
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Auth & Users ───────────────────────────────────────────
+
+model User {
+  id                  String    @id @default(uuid()) @db.Uuid
+  email               String    @unique
+  name                String?
+  image               String?
+  role                String    @default("spectator") // queen | worker | spectator
+  status              String    @default("active") // active | invited | suspended
+  passwordHash        String?   @map("password_hash")
+  otpHash             String?   @map("otp_hash")
+  otpExpiresAt        DateTime? @map("otp_expires_at")
+  resetTokenHash      String?   @map("reset_token_hash")
+  resetTokenExpiresAt DateTime? @map("reset_token_expires_at")
+  googleId            String?   @unique @map("google_id")
+  alertEmailsEnabled  Boolean   @default(true) @map("alert_emails_enabled")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  inspections        Inspection[]
+  feedingLogs        FeedingLog[]
+  healthEvents       HealthEvent[]
+  framePhotos        FramePhoto[]
+  receiptsUploaded   Receipt[]
+  emailsReceived     EmailLog[]             @relation("EmailRecipient")
+  alertNotifications AlertNotificationLog[] @relation("AlertNotifRecipient")
+  tasksAssigned      Task[]                 @relation("TaskAssignee")
+  tasksCreated       Task[]                 @relation("TaskCreator")
+
+  // NextAuth
+  accounts Account[]
+  sessions Session[]
+
+  // V2 relations (new)
+  frameObservations FrameObservation[]
+  varroaCounts      VarroaCount[]
+  treatmentLogs     TreatmentLog[]
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(uuid()) @db.Uuid
+  userId            String  @map("user_id") @db.Uuid
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(uuid()) @db.Uuid
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id") @db.Uuid
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ─── Apiary & Hives ────────────────────────────────────────
+
+model Apiary {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  address   String?
+  latitude  Float?
+  longitude Float?
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  hives Hive[]
+  hubs  Hub[]
+
+  @@map("apiaries")
+}
+
+model Hive {
+  id             String    @id @default(uuid()) @db.Uuid
+  apiaryId       String    @map("apiary_id") @db.Uuid
+  name           String // "Hive 1", "Hive 2"
+  breed          String? // "Buckfast"
+  source         String? // "Mann Lake"
+  installDate    DateTime? @map("install_date")
+  queenMarkColor String?   @map("queen_mark_color") // white | yellow | red | green | blue
+  status         String    @default("active") // active | inactive | dead
+  notes          String?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  apiary             Apiary                 @relation(fields: [apiaryId], references: [id])
+  components         HiveComponent[]
+  inspections        Inspection[]
+  feedingLogs        FeedingLog[]
+  healthEvents       HealthEvent[]
+  harvestLogs        HarvestLog[]
+  tasks              Task[]
+  varroaCounts       VarroaCount[]
+  treatmentLogs      TreatmentLog[]
+  alertNotifications AlertNotificationLog[]
+  cameras            CameraDevice[]
+  sensorReadingsRaw  SensorReadingRaw[]
+
+  @@map("hives")
+}
+
+model HiveComponent {
+  id         String   @id @default(uuid()) @db.Uuid
+  hiveId     String   @map("hive_id") @db.Uuid
+  type       String // bottom-board | entrance-reducer | brood-box | queen-excluder | honey-super | top-feeder | inner-cover | outer-cover
+  position   Int // stack order, 0 = bottom
+  frameCount Int?     @map("frame_count") // only for brood-box / honey-super
+  notes      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  hive   Hive    @relation(fields: [hiveId], references: [id], onDelete: Cascade)
+  frames Frame[]
+
+  @@map("hive_components")
+}
+
+model Frame {
+  id              String    @id @default(uuid()) @db.Uuid
+  componentId     String    @map("component_id") @db.Uuid
+  position        Int // 1-based frame number within box
+  frontHoney      Int       @default(0) @map("front_honey")
+  frontBrood      Int       @default(0) @map("front_brood")
+  frontOpen       Int       @default(0) @map("front_open")
+  frontPollen     Int       @default(0) @map("front_pollen")
+  backHoney       Int       @default(0) @map("back_honey")
+  backBrood       Int       @default(0) @map("back_brood")
+  backOpen        Int       @default(0) @map("back_open")
+  backPollen      Int       @default(0) @map("back_pollen")
+  lastInspectedAt DateTime? @map("last_inspected_at")
+  notes           String?
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  component HiveComponent @relation(fields: [componentId], references: [id], onDelete: Cascade)
+  photos    FramePhoto[]
+
+  // V2 relations (new)
+  observations   FrameObservation[]
+  aiObservations FrameAiObservation[]
+
+  @@unique([componentId, position])
+  @@map("frames")
+}
+
+// ─── Inspections & Logs ────────────────────────────────────
+
+model Inspection {
+  id                 String    @id @default(uuid()) @db.Uuid
+  hiveId             String    @map("hive_id") @db.Uuid
+  inspectedBy        String    @map("inspected_by") @db.Uuid
+  inspectedAt        DateTime  @map("inspected_at")
+  weather            String?
+  tempF              Float?    @map("temp_f")
+  queenSeen          Boolean   @default(false) @map("queen_seen")
+  eggsPresent        Boolean   @default(false) @map("eggs_present")
+  larvaePresent      Boolean   @default(false) @map("larvae_present")
+  cappedBrood        Boolean   @default(false) @map("capped_brood")
+  queenCells         Boolean   @default(false) @map("queen_cells")
+  swarmCells         Boolean   @default(false) @map("swarm_cells")
+  layingPattern      String?   @map("laying_pattern") // solid | spotty | none
+  temperament        String? // calm | nervous | aggressive
+  population         String? // light | moderate | strong
+  framesBees         Int?      @map("frames_bees")
+  framesBrood        Int?      @map("frames_brood")
+  framesHoney        Int?      @map("frames_honey")
+  framesPollen       Int?      @map("frames_pollen")
+  diseaseNotes       String?   @map("disease_notes")
+  notes              String?
+  nextInspectionDate DateTime? @map("next_inspection_date")
+  // Feeder assessment (added in migration 13) — null = not recorded (not equivalent to empty)
+  feederRemaining    String?   @map("feeder_remaining") // full | three_quarter | half | quarter | empty
+  feederType         String?   @map("feeder_type")      // top_feeder | entrance_feeder | frame_feeder
+  lastFedDate        DateTime? @map("last_fed_date")
+  createdAt          DateTime  @default(now()) @map("created_at")
+
+  hive      Hive         @relation(fields: [hiveId], references: [id])
+  inspector User         @relation(fields: [inspectedBy], references: [id])
+  photos    FramePhoto[]
+
+  // V2 relations (new)
+  frameObservations FrameObservation[]
+
+  @@map("inspections")
+}
+
+model FeedingLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  hiveId     String   @map("hive_id") @db.Uuid
+  fedBy      String   @map("fed_by") @db.Uuid
+  fedAt      DateTime @map("fed_at")
+  feedType   String   @map("feed_type") // sugar-syrup-1:1 | sugar-syrup-2:1 | fondant | pollen-patty | other
+  feederType String?  @map("feeder_type") // top-feeder | entrance-feeder | frame-feeder
+  amountMl   Float?   @map("amount_ml")
+  amountG    Float?   @map("amount_g")
+  notes      String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  hive Hive @relation(fields: [hiveId], references: [id])
+  user User @relation(fields: [fedBy], references: [id])
+
+  @@map("feeding_logs")
+}
+
+model HealthEvent {
+  id         String    @id @default(uuid()) @db.Uuid
+  hiveId     String    @map("hive_id") @db.Uuid
+  reportedBy String    @map("reported_by") @db.Uuid
+  eventType  String    @map("event_type") // varroa | nosema | afb | efb | chalkbrood | swarm | requeen | treatment | other
+  severity   String? // low | medium | high | critical
+  treatment  String?
+  notes      String?
+  eventDate  DateTime  @map("event_date")
+  resolvedAt DateTime? @map("resolved_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  hive Hive @relation(fields: [hiveId], references: [id])
+  user User @relation(fields: [reportedBy], references: [id])
+
+  @@map("health_events")
+}
+
+model HarvestLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  hiveId      String   @map("hive_id") @db.Uuid
+  harvestedAt DateTime @map("harvested_at")
+  weightLbs   Float    @map("weight_lbs")
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  hive Hive @relation(fields: [hiveId], references: [id])
+
+  @@map("harvest_logs")
+}
+
+// ─── Frame Photos ──────────────────────────────────────────
+
+model FramePhoto {
+  id                  String    @id @default(uuid()) @db.Uuid
+  frameId             String    @map("frame_id") @db.Uuid
+  inspectionId        String?   @map("inspection_id") @db.Uuid
+  hiveId              String?   @map("hive_id") @db.Uuid
+  side                String // front | back
+  storageKey          String    @map("storage_key")
+  fileSizeBytes       Int?      @map("file_size_bytes")
+  capturedAt          DateTime  @map("captured_at")
+  aiAnalysisJson      Json?     @map("ai_analysis_json")
+  aiAnalyzedAt        DateTime? @map("ai_analyzed_at")
+  aiModelVersion      String?   @map("ai_model_version")
+  notes               String?
+  uploadedBy          String?   @map("uploaded_by") @db.Uuid
+  // Non-FK grouping key: set during pre-save inspection session, cleared by link-inspection.
+  // See frame_observations.inspection_session_id for the parallel column.
+  inspectionSessionId String?   @map("inspection_session_id")
+  // R2 upload lifecycle columns (Phase 2B).
+  // mimeType is set by upload-url when the FramePhoto record is first created.
+  // uploadConfirmedAt is NULL until confirm-upload verifies the file exists in R2.
+  // The base64 analyze route never sets these — they remain null for base64-path rows.
+  mimeType            String?   @map("mime_type")
+  uploadConfirmedAt   DateTime? @map("upload_confirmed_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+
+  frame      Frame       @relation(fields: [frameId], references: [id])
+  inspection Inspection? @relation(fields: [inspectionId], references: [id])
+  uploader   User?       @relation(fields: [uploadedBy], references: [id])
+
+  // V2 relations (new)
+  aiObservations     FrameAiObservation[]
+  observationSources FrameObservationSource[]
+
+  @@map("frame_photos")
+}
+
+// ─── Financials ────────────────────────────────────────────
+
+model FinancialTransaction {
+  id          String   @id @default(uuid()) @db.Uuid
+  date        DateTime
+  type        String // expense | income
+  category    String // Equipment | Bees | Supplies | Treatment | Honey Sales | Other
+  vendor      String?
+  description String?
+  orderRef    String?  @map("order_ref")
+  subtotal    Float?
+  tax         Float?
+  total       Float
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  lineItems FinancialLineItem[]
+  receipts  Receipt[]
+
+  @@map("financial_transactions")
+}
+
+model FinancialLineItem {
+  id            String  @id @default(uuid()) @db.Uuid
+  transactionId String  @map("transaction_id") @db.Uuid
+  qty           Int?
+  sku           String?
+  description   String
+  unitPrice     Float?  @map("unit_price")
+  amount        Float
+
+  transaction FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@map("financial_line_items")
+}
+
+model Receipt {
+  id             String    @id @default(uuid()) @db.Uuid
+  transactionId  String?   @map("transaction_id") @db.Uuid
+  storageKey     String    @map("storage_key")
+  fileSizeBytes  Int?      @map("file_size_bytes")
+  mimeType       String?   @map("mime_type")
+  uploadedAt     DateTime  @default(now()) @map("uploaded_at")
+  uploadedBy     String?   @map("uploaded_by") @db.Uuid
+  aiAnalysisJson Json?     @map("ai_analysis_json")
+  aiAnalyzedAt   DateTime? @map("ai_analyzed_at")
+  aiModelVersion String?   @map("ai_model_version")
+  aiConfidence   Int?      @map("ai_confidence")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  transaction FinancialTransaction? @relation(fields: [transactionId], references: [id])
+  uploader    User?                 @relation(fields: [uploadedBy], references: [id])
+
+  @@map("receipts")
+}
+
+// ─── Tasks ─────────────────────────────────────────────────
+
+model Task {
+  id          String    @id @default(uuid()) @db.Uuid
+  hiveId      String?   @map("hive_id") @db.Uuid
+  title       String
+  description String?
+  status      String    @default("todo") // todo | in_progress | done
+  priority    String    @default("medium") // low | medium | high | urgent
+  assignedTo  String?   @map("assigned_to") @db.Uuid
+  createdBy   String    @map("created_by") @db.Uuid
+  dueDate     DateTime? @map("due_date")
+  completedAt DateTime? @map("completed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  hive     Hive? @relation(fields: [hiveId], references: [id])
+  assignee User? @relation("TaskAssignee", fields: [assignedTo], references: [id])
+  creator  User  @relation("TaskCreator", fields: [createdBy], references: [id])
+
+  @@map("tasks")
+}
+
+// ─── Email Log ─────────────────────────────────────────────
+
+model EmailLog {
+  id              String   @id @default(uuid()) @db.Uuid
+  template        String // invite | password-reset | inspection-reminder | low-feeder | task-assigned | harvest-ready
+  recipientEmail  String   @map("recipient_email")
+  recipientUserId String?  @map("recipient_user_id") @db.Uuid
+  subject         String
+  resendId        String?  @map("resend_id")
+  status          String   @default("sent") // sent | bounced | failed
+  metadataJson    Json?    @map("metadata_json")
+  sentAt          DateTime @default(now()) @map("sent_at")
+
+  recipientUser      User?                  @relation("EmailRecipient", fields: [recipientUserId], references: [id])
+  alertNotifications AlertNotificationLog[]
+
+  @@map("email_log")
+}
+
+// ─── Sensor Devices & Readings (Phase 3 — schema only) ────
+
+model SensorDevice {
+  id           String   @id @default(uuid()) @db.Uuid
+  hiveId       String?  @map("hive_id") @db.Uuid
+  vendor       String // sensorpush | ecowitt | generic
+  deviceId     String   @map("device_id")
+  name         String?
+  pollInterval Int      @default(60) @map("poll_interval") // seconds
+  isActive     Boolean  @default(true) @map("is_active")
+  config       Json? // vendor-specific config
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  readings SensorReading[]
+
+  @@map("sensor_devices")
+}
+
+model SensorReading {
+  id         String   @id @default(uuid()) @db.Uuid
+  deviceId   String   @map("device_id") @db.Uuid
+  tempF      Float?   @map("temp_f")
+  humidity   Float?
+  lux        Float?
+  weight     Float?
+  recordedAt DateTime @map("recorded_at")
+
+  device SensorDevice @relation(fields: [deviceId], references: [id])
+
+  @@index([deviceId, recordedAt])
+  @@map("sensor_readings")
+}
+
+// ─── Frame Observations (V2 — new) ────────────────────────
+
+/// Human-approved observation of a frame at a point in time.
+/// Both sides captured in one row. This is the canonical write path
+/// for per-frame composition data — V1 Frame snapshot columns are
+/// derived from this but were never previously written by the frontend.
+model FrameObservation {
+  id                  String   @id @default(uuid()) @db.Uuid
+  frameId             String   @map("frame_id") @db.Uuid
+  inspectionId        String?  @map("inspection_id") @db.Uuid
+  observedBy          String   @map("observed_by") @db.Uuid
+  observedAt          DateTime @map("observed_at")
+  frontHoney          Int?     @map("front_honey") // 0-100%; null = not observed
+  frontBrood          Int?     @map("front_brood")
+  frontOpen           Int?     @map("front_open")
+  frontPollen         Int?     @map("front_pollen")
+  backHoney           Int?     @map("back_honey")
+  backBrood           Int?     @map("back_brood")
+  backOpen            Int?     @map("back_open")
+  backPollen          Int?     @map("back_pollen")
+  queenSpotted        Boolean  @default(false) @map("queen_spotted")
+  notes               String?
+  // Non-FK grouping key: set during pre-save inspection session.
+  // After saveInspection() returns, POST /frame-observations/link-inspection
+  // sets the real inspectionId on all rows where inspection_session_id = sessionId.
+  inspectionSessionId String?  @map("inspection_session_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  frame      Frame                    @relation(fields: [frameId], references: [id])
+  inspection Inspection?              @relation(fields: [inspectionId], references: [id])
+  observer   User                     @relation(fields: [observedBy], references: [id])
+  sources    FrameObservationSource[]
+
+  @@index([frameId, observedAt])
+  @@map("frame_observations")
+}
+
+/// AI analysis of a single frame photo side. Written by Claude Vision only.
+/// Never edited by humans. Linked to the photo it analyzed.
+model FrameAiObservation {
+  id                 String   @id @default(uuid()) @db.Uuid
+  frameId            String   @map("frame_id") @db.Uuid
+  photoId            String   @map("photo_id") @db.Uuid
+  modelVersion       String   @map("model_version")
+  confidence         Int?
+  side               String // front | back
+  honey              Int      @default(0)
+  brood              Int      @default(0)
+  openComb           Int      @default(0) @map("open_comb")
+  pollen             Int      @default(0)
+  frameVisiblePct    Int?     @map("frame_visible_pct") // % of frame side visible in photo (0-100)
+  imageQualityScore  Int?     @map("image_quality_score") // overall quality score (0-100)
+  imageQualityIssues Json?    @map("image_quality_issues") // ImageQualityIssue[]
+  diseaseFlags       Json?    @map("disease_flags") // DiseaseFlag[] — { type, confidence, description }
+  rawResponse        Json?    @map("raw_response") // actual Anthropic API message envelope
+  normalizedResponse Json?    @map("normalized_response") // parsed FrameAnalysisResult (null if parse failed)
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  frame              Frame                    @relation(fields: [frameId], references: [id])
+  photo              FramePhoto               @relation(fields: [photoId], references: [id])
+  observationSources FrameObservationSource[]
+
+  @@index([frameId, createdAt])
+  @@index([photoId])
+  @@map("frame_ai_observations")
+}
+
+/// Provenance link from a FrameObservation to the photos / AI observations that informed it.
+/// One observation can have multiple sources (front photo + back photo = two rows).
+/// Created in a best-effort block alongside FrameObservation creation.
+model FrameObservationSource {
+  id              String   @id @default(uuid()) @db.Uuid
+  observationId   String   @map("observation_id") @db.Uuid
+  photoId         String   @map("photo_id") @db.Uuid
+  aiObservationId String?  @map("ai_observation_id") @db.Uuid // nullable: photo may have no AI analysis
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  observation   FrameObservation    @relation(fields: [observationId], references: [id], onDelete: Cascade)
+  photo         FramePhoto          @relation(fields: [photoId], references: [id])
+  aiObservation FrameAiObservation? @relation(fields: [aiObservationId], references: [id])
+
+  @@index([observationId])
+  @@index([photoId])
+  @@map("frame_observation_sources")
+}
+
+// ─── Event Backbone (Phase 2A) ─────────────────────────────
+
+/// Fire-and-forget domain event. Written by API routes after mutations.
+/// Async consumers set processed_at when they acknowledge the event.
+/// actorId has no @relation — domain events must survive user deletion.
+model DomainEvent {
+  id            String    @id @default(uuid()) @db.Uuid
+  eventType     String    @map("event_type") // "frame.photo_analyzed" | "frame.observation_recorded" | "frame.inspection_linked"
+  aggregateId   String    @map("aggregate_id") @db.Uuid
+  aggregateType String    @map("aggregate_type") // "Frame" | "FrameObservation"
+  actorId       String?   @map("actor_id") @db.Uuid // no @relation — intentional
+  payload       Json?
+  createdAt     DateTime  @default(now()) @map("created_at")
+  processedAt   DateTime? @map("processed_at")
+
+  @@index([aggregateId])
+  @@index([eventType, createdAt])
+  @@index([aggregateType, aggregateId, createdAt])
+  @@map("domain_events")
+}
+
+/// Immutable audit trail. Schema-only in Phase 2A — no application writes yet.
+/// actorId has no @relation — audit records must survive user deletion.
+model AuditLogV2 {
+  id           String   @id @default(uuid()) @db.Uuid
+  action       String
+  actorId      String?  @map("actor_id") @db.Uuid // no @relation — intentional
+  resourceType String   @map("resource_type")
+  resourceId   String   @map("resource_id") @db.Uuid
+  payload      Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([actorId, createdAt])
+  @@index([resourceType, resourceId])
+  @@map("audit_log_v2")
+}
+
+// ─── Varroa Monitoring ─────────────────────────────────────
+
+/// Per-hive varroa mite count record from an alcohol wash, sugar roll, or sticky board.
+/// Derived values (mitesPer100, mitesPerDay, status) are computed at read time — not stored.
+model VarroaCount {
+  id          String   @id @default(uuid()) @db.Uuid
+  hiveId      String   @map("hive_id") @db.Uuid
+  countedBy   String   @map("counted_by") @db.Uuid
+  countedAt   DateTime @map("counted_at")
+  method      String // "alcohol_wash" | "sugar_roll" | "sticky_board"
+  miteCount   Int      @map("mite_count")
+  beeSample   Int?     @map("bee_sample") // bees in sample — alcohol_wash / sugar_roll
+  daysOnBoard Int?     @map("days_on_board") // days board was in place — sticky_board
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  hive    Hive @relation(fields: [hiveId], references: [id], onDelete: Cascade)
+  counter User @relation(fields: [countedBy], references: [id])
+
+  @@index([hiveId, countedAt(sort: Desc)])
+  @@map("varroa_counts")
+}
+
+/// Per-hive treatment record. endedAt null means the treatment is still active.
+/// daysActive is derived at read time from appliedAt / endedAt — not stored.
+model TreatmentLog {
+  id            String    @id @default(uuid()) @db.Uuid
+  hiveId        String    @map("hive_id") @db.Uuid
+  loggedBy      String    @map("logged_by") @db.Uuid
+  appliedAt     DateTime  @map("applied_at")
+  endedAt       DateTime? @map("ended_at")
+  treatmentType String    @map("treatment_type") // enum-like, validated by API
+  productName   String?   @map("product_name")
+  dosage        String?
+  notes         String?
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  hive   Hive @relation(fields: [hiveId], references: [id], onDelete: Cascade)
+  logger User @relation(fields: [loggedBy], references: [id])
+
+  @@index([hiveId, appliedAt(sort: Desc)])
+  @@map("treatment_logs")
+}
+
+// ─── Camera Devices (Phase 4 — schema only) ────────────────
+
+model CameraDevice {
+  id            String   @id @default(uuid()) @db.Uuid
+  hiveId        String?  @map("hive_id") @db.Uuid
+  unifiDeviceId String   @map("unifi_device_id")
+  name          String
+  rtspUrl       String?  @map("rtsp_url")
+  snapshotUrl   String?  @map("snapshot_url")
+  isActive      Boolean  @default(true) @map("is_active")
+  config        Json?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  hive Hive? @relation(fields: [hiveId], references: [id])
+
+  @@map("camera_devices")
+}
+
+// ─── Hive Health Analysis (LLM-backed) ─────────────────────
+
+model HiveHealthAnalysis {
+  id             String   @id @default(uuid()) @db.Uuid
+  hiveId         String   @map("hive_id") @db.Uuid
+  severityScore  Int      @map("severity_score") // 0-100
+  label          String // Strong | Watch | At Risk | Critical
+  summary        String   @db.Text
+  analysisJson   Json     @map("analysis_json") // full structured response
+  modelVersion   String   @map("model_version")
+  cacheKey       String   @map("cache_key") // hash of inputs (inspections, photos, varroa) for invalidation
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([hiveId, createdAt])
+  @@map("hive_health_analyses")
+}
+
+// ─── Alert Notification Log ────────────────────────────────
+
+/// Records every alert notification email dispatched, keyed per user + hive + rule.
+/// The daily cron job queries this table to enforce per-rule cooldown windows:
+///   critical alerts  → 48h cooldown
+///   warning alerts   → 7 days cooldown
+/// A row is only written after a successful email send. Failed sends do not
+/// write a row, so the alert fires again on the next cron run automatically.
+model AlertNotificationLog {
+  id              String   @id @default(uuid()) @db.Uuid
+  hiveId          String   @map("hive_id") @db.Uuid
+  rule            String // varroa_no_treatment | queen_absent | treatment_too_long | inspection_overdue | disease_flags
+  severity        String // critical | warning
+  sentAt          DateTime @default(now()) @map("sent_at")
+  recipientUserId String?  @map("recipient_user_id") @db.Uuid
+  emailLogId      String?  @map("email_log_id") @db.Uuid
+
+  hive          Hive      @relation(fields: [hiveId], references: [id], onDelete: Cascade)
+  recipientUser User?     @relation("AlertNotifRecipient", fields: [recipientUserId], references: [id], onDelete: SetNull)
+  emailLog      EmailLog? @relation(fields: [emailLogId], references: [id], onDelete: SetNull)
+
+  @@index([hiveId, rule, recipientUserId, sentAt(sort: Desc)], name: "alert_notif_dedup_idx")
+  @@map("alert_notification_log")
+}
+
+// ─── Tachyon Hub & richer readings (INTELLIGENCE_SPEC §6) ─────────────────────
+
+/// A Tachyon (or similar) edge hub that scans BLE sensors at an apiary and
+/// pushes readings to the API. One hub per apiary. Authenticates via X-Hub-Key
+/// header whose SHA-256 is stored in `apiKeyHash`.
+model Hub {
+  id                String    @id @default(uuid()) @db.Uuid
+  apiaryId          String?   @map("apiary_id") @db.Uuid
+  name              String
+  platform          String    @default("tachyon") // tachyon | esp32c6 | custom
+  apiKeyHash        String    @unique @map("api_key_hash")
+  deviceRegistry    Json      @default("{\"devices\":[]}") @map("device_registry")
+  lastHeartbeat     DateTime? @map("last_heartbeat")
+  lastUptimeSec     Int?      @map("last_uptime_sec")
+  lastCpuTempC      Float?    @map("last_cpu_temp_c")
+  lastStorageFreeGb Float?    @map("last_storage_free_gb")
+  firmwareVersion   String?   @map("firmware_version")
+  isActive          Boolean   @default(true) @map("is_active")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  apiary            Apiary?            @relation(fields: [apiaryId], references: [id], onDelete: SetNull)
+  sensorReadingsRaw SensorReadingRaw[]
+
+  @@index([apiaryId])
+  @@map("hubs")
+}
+
+/// Richer reading table for Tachyon/BLE-sourced data.
+/// Coexists with `sensor_readings` (UniFi path) — never touch that table.
+model SensorReadingRaw {
+  id         String   @id @default(uuid()) @db.Uuid
+  hubId      String?  @map("hub_id") @db.Uuid
+  deviceId   String?  @map("device_id") @db.Uuid
+  hiveId     String?  @map("hive_id") @db.Uuid
+  deviceMac  String?  @map("device_mac")
+  vendor     String // tachyon_ble_sc833f | tachyon_ble_s05t | tachyon_gpio | tachyon_ble_custom | ...
+  metric     String // temp_c | humidity_rh | pressure_hpa | weight_g | accel_x | accel_y | accel_z | battery_v | rssi_dbm | ...
+  value      Float
+  unit       String
+  quality    Float?
+  batteryV   Float?   @map("battery_v")
+  signalRssi Float?   @map("signal_rssi")
+  rawPayload Json?    @map("raw_payload")
+  recordedAt DateTime @map("recorded_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  hub  Hub?  @relation(fields: [hubId], references: [id], onDelete: SetNull)
+  hive Hive? @relation(fields: [hiveId], references: [id], onDelete: SetNull)
+
+  @@index([hiveId, metric, recordedAt])
+  @@index([recordedAt])
+  @@index([hubId, recordedAt])
+  @@map("sensor_readings_raw")
+}

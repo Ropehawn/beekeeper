@@ -1,0 +1,22 @@
+{
+  "name": "@beekeeper/shared",
+  "version": "0.0.1",
+  "private": true,
+  "main": "./src/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./emails/*": "./emails/*"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@react-email/components": "^0.0.34",
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/react": "^19.0.0"
+  }
+}
