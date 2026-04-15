@@ -33,9 +33,13 @@ The database is sacred. Application code and user data live in separate silos.
 - `packages/shared/` — Shared types
 
 ## Deploy
-- Railway: `railway up` from project root (service auto-detected by linked config)
+- **Source of truth:** GitHub repo `Ropehawn/beekeeper`, branch `main` (private).
+- **How deploys trigger:** `git push origin main` — Railway auto-builds and deploys both `beekeeper-web` and `beekeeper-api` from the pushed commit.
+- **Build context:** Railway uses repo root (`/`) for both services. Dockerfile paths: `apps/web/Dockerfile` and `apps/api/Dockerfile`.
+- **Fallback:** `railway up` from project root still works if you need to deploy uncommitted local changes during an outage. Avoid in normal operation — it bypasses version control.
 - API startup: `start.sh` runs `prisma migrate deploy` then `node server.js`
 - Web startup: `node server.js` (static server + API proxy)
+- **Rollback:** revert the offending commit on `main` and push, OR redeploy a prior image from the Railway dashboard.
 
 ## Key URLs
 - Web: https://beekeeper-web-production.up.railway.app
