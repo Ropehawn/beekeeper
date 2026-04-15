@@ -125,7 +125,8 @@ export async function sendAlertDigest(
     : `${subjectIcon} ${totalAlerts} hive alert${totalAlerts === 1 ? "" : "s"} need${totalAlerts === 1 ? "s" : ""} attention — Beekeeper`;
 
   // Build one-click unsubscribe token (no expiry — link must always work)
-  const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
+  if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
+  const JWT_SECRET: string = process.env.JWT_SECRET;
   const unsubToken = jwt.sign({ sub: userId, email: to, purpose: "unsubscribe-alerts" }, JWT_SECRET);
   const unsubUrl   = `${apiUrl}/api/v1/auth/unsubscribe?token=${encodeURIComponent(unsubToken)}`;
 

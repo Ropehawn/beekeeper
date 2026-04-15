@@ -1,7 +1,7 @@
 /**
  * Sensor Polling Job
  *
- * Runs every 5 minutes (scheduled by scheduler.ts via node-cron).
+ * Runs every 15 minutes (scheduled by scheduler.ts via node-cron, cron "*\/15 * * * *").
  * Fetches readings from all active sensor devices and stores them
  * in the sensor_readings table for historical charting.
  *

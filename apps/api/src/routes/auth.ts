@@ -8,7 +8,8 @@ import { sendPasswordResetEmail } from "../email/send";
 import { logger, hashEmail } from "../lib/logger";
 
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
+if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
+const JWT_SECRET: string = process.env.JWT_SECRET;
 const WEB_URL = process.env.WEB_URL || "http://localhost:3000";
 
 // POST /api/v1/auth/login — email + password/OTP login

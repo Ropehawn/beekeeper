@@ -88,7 +88,7 @@ if (process.env.DISABLE_SCHEDULER) {
   }, { timezone: "UTC" });
 
   // ── Sensor Polling ──────────────────────────────────────────────────────────
-  // Runs every 5 minutes. Polls all active sensor devices and stores readings.
+  // Runs every 15 minutes. Polls all active sensor devices and stores readings.
 
   const _sensorTask = cron.schedule("*/15 * * * *", async () => {
     const job = "sensor-polling";
