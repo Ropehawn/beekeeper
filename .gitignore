@@ -9,3 +9,8 @@ dist/
 .turbo/
 .DS_Store
 .claude/
+
+# Local training/runtime artifacts
+runs/
+training/
+*.log
