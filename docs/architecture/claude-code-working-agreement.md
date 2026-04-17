@@ -1,73 +1,237 @@
 # Claude Code Working Agreement
 
-Rules for any Claude Code session working in the BeeKeeper repository. These supplement `CLAUDE.md` with behavioral expectations.
+Last updated: 2026-04-16
+
+## Purpose
+
+Claude Code is an implementation agent, not the product architect.
+
+Claude Code should:
+
+- execute bounded changes
+- preserve behavior unless explicitly told otherwise
+- follow domain boundaries
+- keep diffs reviewable
+- avoid incidental rewrites
+- report clearly what changed and what did not
 
 ---
 
-## 1. Read Before Write
+## Global Rules
 
-- Read `CLAUDE.md`, `ARCHITECTURE.md`, and `PROJECT.md` before making changes
-- Read the file you intend to modify before editing it
-- Check `git status` and `git log --oneline -5` at the start of every session
-- If a `docs/RESUME_HERE.md` exists, read it first — it contains handoff context from a prior session
+### 1. Work in the smallest safe scope
 
-## 2. Database is Sacred
+Only touch the files needed for the requested change.
 
-- Never run `prisma db push`
-- Never write DROP/TRUNCATE/DELETE-without-WHERE in migrations
-- Always use `prisma migrate dev --name descriptive_name` for schema changes
-- New columns: nullable or with defaults, always
-- Test migrations locally before committing
+Do not expand scope without explicit instruction.
 
-## 3. Commit Discipline
+### 2. Preserve behavior by default
 
-- Separate code changes from documentation changes
-- Separate schema migrations from application logic
-- Never commit `.env`, secrets, or API keys
-- Never commit `node_modules/`, `dist/`, `.turbo/`, `.next/`
-- Never commit `runs/`, `training/`, or `*.log` files
-- Commit messages: imperative mood, concise, explain why not what
+Unless explicitly instructed, do not:
 
-## 4. Domain Package Rules
+- redesign UX
+- rename flows
+- change data contracts
+- move unrelated logic
+- alter existing behavior
 
-Domain packages (`packages/domain/*`) are pure TypeScript modules:
+### 3. No business logic in presentation files
 
-- **No I/O**: no database calls, no HTTP requests, no file system access
-- **No framework imports**: no Express, no Prisma, no React
-- **Allowed imports**: other domain packages, `packages/shared`
-- **Exports**: types, validators, selectors, constants, pure functions
-- **Purpose**: the API layer imports domain logic, not the other way around
+Do not add new domain logic directly into:
 
-## 5. File Modification Boundaries
+- HTML page files
+- DOM render functions
+- CSS files
+- presentation-only components
 
-| If you need to... | Modify... | Never modify... |
-|-------------------|-----------|-----------------|
-| Add an API endpoint | `apps/api/src/routes/*.ts` | `apps/web/` |
-| Change the schema | `packages/db/prisma/schema.prisma` + new migration | Existing migration files |
-| Add a domain type | `packages/domain/*/types.ts` | `apps/api/` (import it instead) |
-| Change UI behavior | `apps/web/public/index.html` or `api-client.js` | `apps/api/` (unless adding a new endpoint) |
-| Add a shared type | `packages/shared/src/` | Domain-specific files |
+### 4. No direct backend calls from UI when a domain adapter exists
 
-## 6. Testing
+If a domain `api.ts` or action layer exists, use it.
 
-- API routes have co-located test files (`*.test.ts`)
-- Tests use Vitest
-- Mock external services (UniFi, Resend, Claude API) — never call real APIs in tests
-- Test the happy path and the most likely failure mode
+Do not introduce raw `fetch()` calls into UI code unless explicitly directed.
 
-## 7. Session Handoff
+### 5. Prefer additive extraction
 
-If work is incomplete at the end of a session:
-- Commit what is stable
-- Create or update `docs/RESUME_HERE.md` with:
-  - What was done
-  - What remains
-  - Any decisions made or deferred
-  - Files touched
+When refactoring:
 
-## 8. No Speculative Work
+1. create scaffolding first
+2. move logic second
+3. update call sites third
+4. delete old code last
 
-- Don't add features, abstractions, or error handling beyond what the task requires
-- Don't refactor adjacent code unless the task requires it
-- Don't create planning documents unless asked
-- Don't add comments explaining what code does — only why, when non-obvious
+### 6. Respect domain ownership
+
+Examples:
+
+- inspection logic belongs in `domain/inspections`
+- hardware logic belongs in `domain/hardware`
+- hive structure logic belongs in `domain/hives`
+
+### 7. Reuse canonical types
+
+If a type already exists, reuse it.
+
+Do not create duplicate shapes with slightly different names.
+
+### 8. Keep diffs reviewable
+
+Prefer multiple small commits over one large mixed commit.
+
+### 9. Do not silently broaden scope
+
+If the task is hardware extraction, do not opportunistically refactor dashboard, auth, or inspections.
+
+### 10. Database changes are additive only
+
+No destructive migrations unless explicitly approved.
+
+### 11. Do not hide uncertainty
+
+If code behavior is unclear, state what was confirmed vs inferred.
+
+### 12. Preserve IDs and selectors during extraction unless asked to change them
+
+This helps keep behavior stable during incremental migration.
+
+---
+
+## Required Task Pattern
+
+For each task, Claude Code should follow this order.
+
+### Step 1 — Understand
+
+Read only the minimum relevant files.
+
+State which files were inspected.
+
+### Step 2 — Plan
+
+Before editing, state:
+
+- files to change
+- intended behavior impact
+- main risks
+- task type:
+  - scaffolding
+  - extraction
+  - refactor
+  - feature
+  - contract
+
+### Step 3 — Execute
+
+Make the bounded change.
+
+### Step 4 — Verify
+
+Check:
+
+- imports
+- references
+- obvious runtime breakage
+- build or lint sanity if available and reasonable
+
+### Step 5 — Report
+
+Return:
+
+- what changed
+- what did not change
+- follow-ups or risks
+- whether behavior was intentionally changed
+
+---
+
+## Allowed Task Types
+
+### Scaffolding Task
+Create folders, files, and structure. No behavior change.
+
+### Extraction Task
+Move existing logic into the right home. Preserve behavior.
+
+### Refactor Task
+Improve internal structure while preserving external behavior.
+
+### Feature Task
+Add new behavior within a clearly defined domain.
+
+### Contract Task
+Define or tighten shared types, API shapes, or domain boundaries.
+
+---
+
+## Disallowed Behaviors
+
+Claude Code should not:
+
+- rewrite whole files without need
+- mix architecture changes with feature changes in one task
+- introduce new dependencies casually
+- create ad hoc naming conventions
+- change backend contracts from a UI-only task
+- delete old paths before new paths are verified
+- move multiple domains at once unless explicitly instructed
+
+---
+
+## Standard Prompt Expectations
+
+A good task instruction should include:
+
+- target domain
+- scope boundary
+- behavior expectations
+- files or folders that may be changed
+- files or folders that must not be changed
+- whether UI must remain identical
+- whether contracts may change
+
+Claude Code should reflect that scope back before making large edits.
+
+---
+
+## Default Safety Mode
+
+Unless told otherwise, Claude Code should operate in **preserve-behavior mode**.
+
+That means:
+
+- keep API behavior stable
+- keep element IDs stable
+- keep existing flows stable
+- favor extraction over redesign
+
+---
+
+## Review Preference
+
+Claude Code should prefer:
+
+- small bounded commits
+- explicit summaries
+- limited-file diffs
+- no "while I was here" cleanups
+
+---
+
+## Example Good Task
+
+> Create `packages/domain/hardware/` with `types.ts`, `api.ts`, `actions.ts`, `selectors.ts`, `validators.ts`, `constants.ts`, and `README.md`. Do not change runtime behavior. Do not update UI files yet.
+
+## Example Bad Task
+
+> Refactor the frontend to be cleaner and more modern.
+
+---
+
+## Success Criteria
+
+Claude Code is operating correctly if:
+
+- a task can be reviewed quickly
+- the change has a clear boundary
+- behavior stays stable unless intentionally changed
+- logic moves into the right domain
+- the codebase gets easier to delegate over time

@@ -1,1 +1,0 @@
-// @beekeeper/domain-hardware — constants

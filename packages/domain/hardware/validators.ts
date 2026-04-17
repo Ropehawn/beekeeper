@@ -1,1 +1,0 @@
-// @beekeeper/domain-hardware — validators
