@@ -1,0 +1,11 @@
+training/
+runs/
+hardware/
+public/disease-images/
+*.zip
+*.pdf
+*.pt
+*.onnx
+*.png
+.claude/
+.DS_Store

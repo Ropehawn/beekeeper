@@ -414,17 +414,20 @@ model EmailLog {
 // ─── Sensor Devices & Readings (Phase 3 — schema only) ────
 
 model SensorDevice {
-  id           String   @id @default(uuid()) @db.Uuid
-  hiveId       String?  @map("hive_id") @db.Uuid
-  vendor       String // sensorpush | ecowitt | generic
-  deviceId     String   @map("device_id")
-  name         String?
-  pollInterval Int      @default(60) @map("poll_interval") // seconds
-  isActive     Boolean  @default(true) @map("is_active")
-  config       Json? // vendor-specific config
-  createdAt    DateTime @default(now()) @map("created_at")
+  id             String    @id @default(uuid()) @db.Uuid
+  hiveId         String?   @map("hive_id") @db.Uuid
+  vendor         String // sensorpush | ecowitt | tachyon_ble_sc833f | tachyon_ble_s05t | generic
+  deviceId       String    @unique @map("device_id") // permanent identity: QR sensor code (e.g., "T7K2M") or vendor device ID
+  name           String?
+  currentMac     String?   @map("current_mac") // current BLE MAC — mutable, changes on battery swap
+  pollInterval   Int       @default(60) @map("poll_interval") // seconds
+  isActive       Boolean   @default(true) @map("is_active")
+  config         Json? // vendor-specific config, events[], mac_history[]
+  provisionedAt  DateTime? @map("provisioned_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
-  readings SensorReading[]
+  readings    SensorReading[]
+  rawReadings SensorReadingRaw[]
 
   @@map("sensor_devices")
 }
@@ -718,11 +721,13 @@ model SensorReadingRaw {
   recordedAt DateTime @map("recorded_at")
   createdAt  DateTime @default(now()) @map("created_at")
 
-  hub  Hub?  @relation(fields: [hubId], references: [id], onDelete: SetNull)
-  hive Hive? @relation(fields: [hiveId], references: [id], onDelete: SetNull)
+  hub    Hub?          @relation(fields: [hubId], references: [id], onDelete: SetNull)
+  device SensorDevice? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  hive   Hive?         @relation(fields: [hiveId], references: [id], onDelete: SetNull)
 
   @@index([hiveId, metric, recordedAt])
   @@index([recordedAt])
   @@index([hubId, recordedAt])
+  @@index([deviceId, metric, recordedAt])
   @@map("sensor_readings_raw")
 }

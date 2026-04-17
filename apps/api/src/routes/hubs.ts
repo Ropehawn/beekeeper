@@ -239,4 +239,155 @@ router.get("/config", requireHubKey, async (req: HubRequest, res) => {
   });
 });
 
+// ── Sensor Device Provisioning ──────────────────────────────────────────────
+// These endpoints are called by the Tachyon provisioning tool to create/update
+// sensor_devices records in Postgres. The provisioning tool is the source of
+// truth for QR code → MAC binding. Hive assignment is handled separately by
+// the BeeKeeper web app's apiary configuration UI.
+
+const provisionSchema = z.object({
+  sensorId: z.string().min(3).max(10),       // QR code ID, e.g., "T7K2M"
+  mac: z.string().min(11).max(17),           // BLE MAC, e.g., "CF:66:52:74:C1:B2"
+  vendor: z.string().default("tachyon_ble_sc833f"),
+  name: z.string().optional(),
+  events: z.array(z.any()).optional(),        // provisioning event log
+  temp_c: z.number().optional(),
+  humidity: z.number().optional(),
+  rssi: z.number().optional(),
+});
+
+/**
+ * POST /api/v1/hubs/devices/provision — create or update a sensor device.
+ * Idempotent: if sensorId already exists, updates MAC (relink). If MAC
+ * is already bound to a different sensorId, returns 409.
+ * Auth: hub key (called from Tachyon provisioning tool).
+ */
+router.post("/devices/provision", requireHubKey, async (req: HubRequest, res) => {
+  const parsed = provisionSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid input", details: parsed.error.flatten() });
+  }
+
+  const { sensorId, mac, vendor, name, events, temp_c, humidity, rssi } = parsed.data;
+  const macUpper = mac.toUpperCase();
+
+  try {
+    // Invariant: one MAC → one sensor device
+    const macConflict = await db.sensorDevice.findFirst({
+      where: { currentMac: macUpper, deviceId: { not: sensorId } },
+    });
+    if (macConflict) {
+      return res.status(409).json({
+        error: "mac_already_linked",
+        existingDeviceId: macConflict.deviceId,
+      });
+    }
+
+    // Find existing device by sensorId (deviceId field)
+    const existing = await db.sensorDevice.findUnique({ where: { deviceId: sensorId } });
+
+    if (existing) {
+      // Relink — update MAC, preserve everything else
+      const oldMac = existing.currentMac;
+      const existingConfig = (existing.config as any) || {};
+      const existingEvents: any[] = existingConfig.events || [];
+
+      existingEvents.push({
+        type: "relinked",
+        at: new Date().toISOString(),
+        old_mac: oldMac,
+        new_mac: macUpper,
+      });
+
+      const updated = await db.sensorDevice.update({
+        where: { id: existing.id },
+        data: {
+          currentMac: macUpper,
+          config: { ...existingConfig, events: existingEvents },
+        },
+      });
+
+      logger.info({ deviceId: sensorId, oldMac, newMac: macUpper }, "sensor.relinked");
+      return res.json({ device: updated, relinked: true, oldMac });
+    } else {
+      // New device
+      const created = await db.sensorDevice.create({
+        data: {
+          vendor,
+          deviceId: sensorId,
+          name: name || sensorId,
+          currentMac: macUpper,
+          provisionedAt: new Date(),
+          config: {
+            events: events || [
+              { type: "provisioned", at: new Date().toISOString() },
+              { type: "linked", at: new Date().toISOString(), mac: macUpper, rssi, temp_c, humidity },
+            ],
+          },
+        },
+      });
+
+      logger.info({ deviceId: sensorId, mac: macUpper }, "sensor.provisioned");
+      return res.json({ device: created, relinked: false });
+    }
+  } catch (err: any) {
+    logger.error({ err: err.message, deviceId: sensorId }, "sensor.provision.error");
+    return res.status(500).json({ error: "Internal error", message: err.message });
+  }
+});
+
+/**
+ * GET /api/v1/hubs/devices — list all sensor devices.
+ * Used by daemon to build MAC → device_id cache.
+ * Auth: hub key.
+ */
+router.get("/devices", requireHubKey, async (req: HubRequest, res) => {
+  const devices = await db.sensorDevice.findMany({
+    where: { isActive: true },
+    select: {
+      id: true,
+      deviceId: true,
+      currentMac: true,
+      vendor: true,
+      name: true,
+      hiveId: true,
+      isActive: true,
+    },
+  });
+
+  // Build MAC → device_id lookup for daemon
+  const macMap: Record<string, string> = {};
+  for (const d of devices) {
+    if (d.currentMac) macMap[d.currentMac.toUpperCase()] = d.id;
+  }
+
+  return res.json({ devices, macMap });
+});
+
+/**
+ * DELETE /api/v1/hubs/devices/:sensorId — unlink a sensor device.
+ * Sets isActive=false, clears currentMac. Does not delete — preserves history.
+ */
+router.delete("/devices/:sensorId", requireHubKey, async (req: HubRequest, res) => {
+  const sensorId = req.params.sensorId as string;
+  const device = await db.sensorDevice.findFirst({ where: { deviceId: sensorId } });
+  if (!device) return res.status(404).json({ error: "not found" });
+
+  const existingConfig = (device.config as any) || {};
+  const existingEvents = existingConfig.events || [];
+  existingEvents.push({ type: "unlinked", at: new Date().toISOString() });
+
+  await db.sensorDevice.update({
+    where: { id: device.id },
+    data: {
+      currentMac: null,
+      isActive: false,
+      config: { ...existingConfig, events: existingEvents },
+    },
+  });
+
+  logger.info({ deviceId: sensorId }, "sensor.unlinked");
+  return res.json({ ok: true });
+});
+
 export { router as hubsRouter };
