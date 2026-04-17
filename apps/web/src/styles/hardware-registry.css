@@ -1,0 +1,167 @@
+/**
+ * apps/web/src/styles/hardware-registry.css
+ *
+ * Ownership:
+ *   All styles scoped to the hardware registry / provisioning lane.
+ *   Covers the registry table, device cards, discovery panel, and
+ *   provisioning flow modals/forms.
+ *
+ * Will own:
+ *   - .hardware-registry-*   — page-level layout and containers
+ *   - .registry-table-*      — provisioned device list table
+ *   - .device-card-*         — individual device card component
+ *   - .discovery-panel-*     — discovered (unprovisionned) device list
+ *   - .lifecycle-badge-*     — RegistryLifecycleStatus color badges
+ *   - .asset-id-*            — formatted asset ID display (BK-SEN-000241)
+ *
+ * Does NOT own:
+ *   - Observability widgets (signal health, battery, readings charts)
+ *   - Global app layout or nav styles
+ *   - Hive, inspection, or feeding page styles
+ *
+ * Conventions:
+ *   - BEM-style class names with the hardware-registry prefix
+ *   - CSS custom properties for colors to stay in sync with the app theme
+ */
+
+/* ---------------------------------------------------------------------------
+   Lifecycle status badges
+   Maps to RegistryLifecycleStatus values in packages/domain/hardware/types.ts
+--------------------------------------------------------------------------- */
+
+.lifecycle-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.lifecycle-badge--discovered  { background: #e8f4fd; color: #1a6fa0; }
+.lifecycle-badge--pending     { background: #fff7e6; color: #b45309; }
+.lifecycle-badge--provisioned { background: #f0fdf4; color: #166534; }
+.lifecycle-badge--assigned    { background: #eff6ff; color: #1d4ed8; }
+.lifecycle-badge--unassigned  { background: #f9fafb; color: #6b7280; }
+.lifecycle-badge--retired     { background: #fef2f2; color: #991b1b; }
+.lifecycle-badge--unknown     { background: #f3f4f6; color: #9ca3af; }
+
+/* ---------------------------------------------------------------------------
+   Asset ID display
+   Used wherever a formatted BK-XXX-000000 identifier is shown
+--------------------------------------------------------------------------- */
+
+.asset-id {
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.85rem;
+  letter-spacing: 0.02em;
+  color: #374151;
+}
+
+.asset-id--unissued {
+  color: #9ca3af;
+  font-style: italic;
+}
+
+/* ---------------------------------------------------------------------------
+   Registry table
+   Placeholder styles — will be expanded during the migration step
+--------------------------------------------------------------------------- */
+
+.registry-table-container {
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.registry-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.registry-table th {
+  background: #f9fafb;
+  text-align: left;
+  padding: 10px 14px;
+  font-weight: 600;
+  color: #374151;
+  border-bottom: 1px solid #e5e7eb;
+  white-space: nowrap;
+}
+
+.registry-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: middle;
+}
+
+.registry-table tr:last-child td {
+  border-bottom: none;
+}
+
+.registry-table tr:hover td {
+  background: #f9fafb;
+}
+
+/* ---------------------------------------------------------------------------
+   Discovery panel
+   Placeholder styles — will be expanded during the migration step
+--------------------------------------------------------------------------- */
+
+.discovery-panel {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.discovery-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.discovery-panel__title {
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: #111827;
+}
+
+.discovery-panel__empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 0.875rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Device card
+   Placeholder styles — will be expanded during the migration step
+--------------------------------------------------------------------------- */
+
+.device-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+  background: #ffffff;
+}
+
+.device-card__name {
+  font-weight: 600;
+  font-size: 0.9375rem;
+  color: #111827;
+  margin-bottom: 4px;
+}
+
+.device-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.8125rem;
+  color: #6b7280;
+}

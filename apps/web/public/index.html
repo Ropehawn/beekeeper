@@ -2179,7 +2179,7 @@
       autoFillDate('he-date'); loadHealthEvents();
     }
     if (page === 'harvest') { autoFillDate('harv-date'); loadHarvestLogs(); }
-    if (page === 'admin-sensors') { loadSensorDevices(); }
+    if (page === 'admin-sensors') { refreshSensorsTableFromRegistry(); }
     // Set today's date on any date field that's empty when its page opens
     if (page === 'financials' || page === 'setup') {
       const today = todayLocalISO();
@@ -7651,13 +7651,33 @@
     document.getElementById('discover-results').style.display = 'none';
 
     try {
-      const result = isSensor ? await BeeAPI.discoverSensors() : await BeeAPI.discoverCameras();
-      const devices = isSensor ? result.sensors : result.cameras;
-      document.getElementById('discover-loading').style.display = 'none';
-      document.getElementById('discover-results').style.display = 'block';
-      document.getElementById('discover-count-label').textContent =
-        devices.length + ' ' + type.slice(0, -1) + (devices.length !== 1 ? 's' : '') + ' found on console';
-      if (isSensor) { renderDiscoverList(devices); } else { renderDiscoverCameraList(devices); }
+      if (isSensor) {
+        try {
+          await discoverSensorsViaRegistry();
+        } catch (_) {
+          // fallback: original BeeAPI path
+          const result = await BeeAPI.discoverSensors();
+          const devices = result.sensors;
+          document.getElementById('discover-loading').style.display = 'none';
+          document.getElementById('discover-results').style.display = 'block';
+          document.getElementById('discover-count-label').textContent =
+            devices.length + ' sensor' + (devices.length !== 1 ? 's' : '') + ' found on console';
+          renderDiscoverList(devices);
+        }
+      } else {
+        try {
+          await discoverCamerasViaRegistry();
+        } catch (_) {
+          // fallback: original BeeAPI path
+          const result = await BeeAPI.discoverCameras();
+          const devices = result.cameras;
+          document.getElementById('discover-loading').style.display = 'none';
+          document.getElementById('discover-results').style.display = 'block';
+          document.getElementById('discover-count-label').textContent =
+            devices.length + ' camera' + (devices.length !== 1 ? 's' : '') + ' found on console';
+          renderDiscoverCameraList(devices);
+        }
+      }
     } catch (e) {
       document.getElementById('discover-loading').style.display = 'none';
       document.getElementById('discover-results').style.display = 'block';
@@ -7713,7 +7733,7 @@
       await BeeAPI.registerCameraDevice({ unifiDeviceId: deviceId, name: name, hiveId: hiveId });
       showToast('Camera assigned');
       closeDiscoverModal();
-      loadCameraDevices();
+      refreshCamerasTableFromRegistry();
     } catch (e) {
       showToast('Failed: ' + e.message);
     }
@@ -7753,7 +7773,7 @@
     try {
       await BeeAPI.deleteCameraDevice(id);
       showToast('Camera removed');
-      loadCameraDevices();
+      refreshCamerasTableFromRegistry();
     } catch (e) { showToast('Failed: ' + e.message); }
   }
 
@@ -8013,13 +8033,92 @@
         pollInterval: 60,
       });
       closeAssignModal();
-      await loadSensorDevices();
+      await refreshSensorsTableFromRegistry();
       showToast('✅ ' + name + ' assigned');
     } catch (e) {
       showToast('⚠️ ' + (e.message || 'Could not save assignment'));
     } finally {
       if (btn) btn.disabled = false;
     }
+  }
+
+  // Refresh the Assigned Sensors table via the new registry lane.
+  // Falls back to loadSensorDevices() if the module is unavailable or render fails.
+  async function refreshSensorsTableFromRegistry() {
+    try {
+      const mod = await import('/dist/pages/hardware-registry.js');
+      await mod.refreshSensorDevices();
+      const state = mod.getRegistryPageState();
+      const tbody = document.getElementById('sensors-tbody');
+      if (tbody) mod.renderRegistryTable(tbody, state.sensorDevices, state.sensorDevicesLoad);
+      registeredDeviceIds = new Set(state.sensorDevices.map(function (d) { return d.deviceId; }));
+    } catch (_) {
+      await loadSensorDevices(); // fallback
+    }
+  }
+
+  /**
+   * Run the UniFi Protect sensor discovery scan via the registry module,
+   * then render results into the discover panel using renderDiscoveryPanel.
+   * Returns true on success so discoverDevices() can skip the fallback path.
+   */
+  async function discoverSensorsViaRegistry() {
+    const mod = await import('/dist/pages/hardware-registry.js');
+    await mod.discoverSensors();
+    const state = mod.getRegistryPageState();
+    if (state.sensorDiscoveryLoad.status !== 'success') {
+      throw new Error(state.sensorDiscoveryLoad.error || 'Discovery did not succeed');
+    }
+    const sensors = state.discoveredSensors;
+    document.getElementById('discover-loading').style.display = 'none';
+    document.getElementById('discover-results').style.display = 'block';
+    document.getElementById('discover-count-label').textContent =
+      sensors.length + ' sensor' + (sensors.length !== 1 ? 's' : '') + ' found on console';
+    const list = document.getElementById('discover-device-list');
+    mod.renderDiscoveryPanel(list, sensors, registeredDeviceIds);
+  }
+
+  /**
+   * Refresh the Assigned Cameras table (#cameras-tbody) via the new registry lane.
+   * Falls back to loadCameraDevices() if the module is unavailable or render fails.
+   * Note: the fallback also refreshes the live cameras widget; the new path
+   * updates only the admin table (live cameras migration is a separate phase).
+   */
+  async function refreshCamerasTableFromRegistry() {
+    try {
+      const mod = await import('/dist/pages/hardware-registry.js');
+      await mod.refreshCameraDevices();
+      const state = mod.getRegistryPageState();
+      const tbody = document.getElementById('cameras-tbody');
+      if (tbody) mod.renderCameraRegistryTable(
+        tbody,
+        state.cameraDevices,
+        state.cameraDevicesLoad,
+        function(id) { return BeeAPI.getCameraSnapshotUrl(id) + '&t=' + Date.now(); }
+      );
+    } catch (_) {
+      await loadCameraDevices(); // fallback
+    }
+  }
+
+  /**
+   * Run the UniFi Protect camera discovery scan via the registry module,
+   * then render results into the discover panel using renderCameraDiscoveryPanel.
+   * Throws on failure so discoverDevices() falls back to the original BeeAPI path.
+   */
+  async function discoverCamerasViaRegistry() {
+    const mod = await import('/dist/pages/hardware-registry.js');
+    await mod.discoverCameras();
+    const state = mod.getRegistryPageState();
+    if (state.cameraDiscoveryLoad.status !== 'success') {
+      throw new Error(state.cameraDiscoveryLoad.error || 'Discovery did not succeed');
+    }
+    const cameras = state.discoveredCameras;
+    document.getElementById('discover-loading').style.display = 'none';
+    document.getElementById('discover-results').style.display = 'block';
+    document.getElementById('discover-count-label').textContent =
+      cameras.length + ' camera' + (cameras.length !== 1 ? 's' : '') + ' found on console';
+    mod.renderCameraDiscoveryPanel(document.getElementById('discover-device-list'), cameras);
   }
 
   async function loadSensorDevices() {
@@ -8066,7 +8165,7 @@
     if (!confirm('Remove "' + name + '"?\nThis will stop sensor readings for the linked hive.')) return;
     try {
       await BeeAPI.deleteSensorDevice(id);
-      await loadSensorDevices();
+      await refreshSensorsTableFromRegistry();
       showToast('✅ ' + name + ' removed');
     } catch (e) {
       showToast('⚠️ ' + (e.message || 'Could not remove sensor'));
@@ -8652,6 +8751,43 @@
     document.getElementById('photo-lightbox-spinner').style.display = 'none';
     document.getElementById('photo-lightbox-unavail').style.display = 'none';
   }
+
+  // ─── HARDWARE REGISTRY BRIDGE ──────────────────────────────────────────────
+  // Temporary bridge for incremental extraction of the registry/provisioning lane.
+  // Does NOT run automatically. Does NOT change any existing behavior.
+  // Exposes a single console-callable debug function.
+  //
+  // Call from the browser console:
+  //   const state = await window.__loadHardwareRegistryPreview()
+  //   console.table(state)
+  //
+  // When called, it loads registry state via the new lane AND renders
+  // #sensors-tbody from that state. Normal nav behavior is unchanged —
+  // the existing loadSensorDevices() path is still the live path.
+  // ---------------------------------------------------------------------------
+  window.__loadHardwareRegistryPreview = async function () {
+    try {
+      const mod = await import('/dist/pages/hardware-registry.js');
+      await mod.loadRegistryPage();
+      const state = mod.getRegistryPageState();
+
+      // Render #sensors-tbody from new registry state (bridge only).
+      // Does not replace the existing loadSensorDevices() render path.
+      const tbody = document.getElementById('sensors-tbody');
+      if (tbody) {
+        mod.renderRegistryTable(tbody, state.sensorDevices, state.sensorDevicesLoad);
+      }
+
+      return state;
+    } catch (e) {
+      console.warn(
+        '[hardware-registry bridge] Failed — check /dist/pages/hardware-registry.js exists.',
+        e.message
+      );
+      return null;
+    }
+  };
+  // ─── END HARDWARE REGISTRY BRIDGE ──────────────────────────────────────────
 </script>
 </body>
 </html>
