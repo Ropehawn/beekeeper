@@ -1,0 +1,1 @@
+// @beekeeper/domain-inspections — constants
