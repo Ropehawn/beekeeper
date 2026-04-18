@@ -151,6 +151,169 @@ export class MacCollisionError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// AssetIdConflictError
+//
+// Thrown by persistProvisionNew() when the in-transaction assetId uniqueness
+// check finds an existing registry record with the same assetId. The calling
+// route should return HTTP 409 and surface conflictingRegistryId so the
+// operator can investigate before retrying with a different assetId.
+// ---------------------------------------------------------------------------
+
+export class AssetIdConflictError extends Error {
+  readonly conflictingRegistryId: string;
+
+  constructor(assetId: string, conflictingRegistryId: string) {
+    super(
+      `assetId '${assetId}' is already owned by registry record ${conflictingRegistryId}.`,
+    );
+    this.name                  = "AssetIdConflictError";
+    this.conflictingRegistryId = conflictingRegistryId;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ProvisionNewInput
+//
+// Parameter bag for persistProvisionNew(). Kept as an interface rather than
+// individual args so callers read as named fields and the function signature
+// stays stable as we add optional fields later (e.g. notes, firmwareVersion).
+// ---------------------------------------------------------------------------
+
+export interface ProvisionNewInput {
+  // Fields supplied by the operator in the resolve request body
+  assetId:           string;
+  name:              string;
+  vendor:            string;
+  model:             string;
+  transport:         string;
+  role:              string;
+  hiveId:            string | null;
+  currentMacAddress: string | null;   // normalized (uppercase/trimmed) before call
+  // Derived from the queue item's observation context — not in the request body
+  deviceIdentifier:  string;          // observation.deviceIdentifier ?? assetId
+  hubId:             string | null;   // domain_events.aggregateId
+  // Actor and queue linkage
+  actorId:           string;          // req.user!.id
+  queueItemId:       string;          // domain_events.id being resolved
+  // Existing queue item payload — spread before appending resolution fields
+  existingQueuePayload: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// persistProvisionNew
+//
+// Called when an operator resolves a 'register_new' queue item by supplying
+// the administrative fields needed to provision the device.
+//
+// Runs entirely inside a single Prisma transaction:
+//   1. Uniqueness pre-flight: assetId — throws AssetIdConflictError on collision
+//   2. Uniqueness pre-flight: currentMacAddress — throws MacCollisionError on collision
+//   3. sensor_registry INSERT — creates the stable identity record
+//   4. provisioning_events INSERT — records the provisioning act for the audit trail
+//   5. domain_events UPDATE — marks the queue item processed and appends resolution context
+//
+// Returns the UUID of the newly created SensorRegistry row.
+//
+// Throws:
+//   AssetIdConflictError  — assetId already in use (HTTP 409)
+//   MacCollisionError     — currentMacAddress already in use (HTTP 409)
+//   Any Prisma error      — unexpected (HTTP 500)
+// ---------------------------------------------------------------------------
+
+export async function persistProvisionNew(input: ProvisionNewInput): Promise<string> {
+  const registryId = crypto.randomUUID();
+  const now        = new Date();
+
+  await db.$transaction(async (tx: any) => {
+    // ── Belt: assetId uniqueness inside transaction ──────────────────────────
+    // Catches races where two operators attempt to provision the same assetId
+    // simultaneously. Both may pass a pre-transaction check; only one wins here.
+    const assetConflict = await tx.sensorRegistry.findUnique({
+      where:  { assetId: input.assetId },
+      select: { id: true },
+    });
+    if (assetConflict !== null) {
+      throw new AssetIdConflictError(input.assetId, assetConflict.id);
+    }
+
+    // ── Belt: MAC uniqueness inside transaction (only when MAC is supplied) ──
+    if (input.currentMacAddress !== null) {
+      const macConflict = await tx.sensorRegistry.findFirst({
+        where:  { currentMacAddress: input.currentMacAddress },
+        select: { id: true },
+      });
+      if (macConflict !== null) {
+        throw new MacCollisionError(input.currentMacAddress, macConflict.id);
+      }
+    }
+
+    // ── Create the registry record ───────────────────────────────────────────
+    await tx.sensorRegistry.create({
+      data: {
+        id:                registryId,
+        assetId:           input.assetId,
+        deviceIdentifier:  input.deviceIdentifier,
+        vendor:            input.vendor,
+        model:             input.model,
+        transport:         input.transport,
+        kind:              "sensor",
+        name:              input.name,
+        lifecycleStatus:   "provisioned",
+        currentMacAddress: input.currentMacAddress,
+        hubId:             input.hubId,
+        hiveId:            input.hiveId,
+        role:              input.role,
+        labelPrinted:      false,
+        provisionedAt:     now,
+      },
+    });
+
+    // ── Write the provisioning audit event ───────────────────────────────────
+    // eventType 'provisioned' marks the moment this physical device was entered
+    // into the registry by an operator. payload records the source so the audit
+    // trail links back to the original hub observation.
+    await tx.provisioningEvent.create({
+      data: {
+        id:         crypto.randomUUID(),
+        registryId,
+        eventType:  "provisioned",
+        actorId:    input.actorId,
+        occurredAt: now,
+        payload: {
+          source:      "review_queue_resolve",
+          queueItemId: input.queueItemId,
+        },
+      },
+    });
+
+    // ── Seal the queue item ───────────────────────────────────────────────────
+    // processedAt marks it as no longer pending. Resolution metadata is appended
+    // to the original payload so the full context (observation + who resolved it +
+    // what was created) lives in one place.
+    await tx.domainEvent.update({
+      where: { id: input.queueItemId },
+      data: {
+        processedAt: now,
+        payload: {
+          ...input.existingQueuePayload,
+          resolvedBy:        input.actorId,
+          resolvedAt:        now.toISOString(),
+          resolution:        "provision",
+          createdRegistryId: registryId,
+        },
+      },
+    });
+  });
+
+  logger.info(
+    { registryId, assetId: input.assetId, queueItemId: input.queueItemId },
+    "sensor-registry: new device provisioned from review queue",
+  );
+
+  return registryId;
+}
+
+// ---------------------------------------------------------------------------
 // loadRegistryRecordsForHub
 //
 // Loads all non-retired SensorRegistry records for a given hub and returns
