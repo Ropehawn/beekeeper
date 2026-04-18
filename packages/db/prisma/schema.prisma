@@ -137,6 +137,7 @@ model Hive {
   alertNotifications AlertNotificationLog[]
   cameras            CameraDevice[]
   sensorReadingsRaw  SensorReadingRaw[]
+  sensorRegistries   SensorRegistry[]
 
   @@map("hives")
 }
@@ -697,6 +698,7 @@ model Hub {
 
   apiary            Apiary?            @relation(fields: [apiaryId], references: [id], onDelete: SetNull)
   sensorReadingsRaw SensorReadingRaw[]
+  sensorRegistries  SensorRegistry[]
 
   @@index([apiaryId])
   @@map("hubs")
@@ -730,4 +732,93 @@ model SensorReadingRaw {
   @@index([hubId, recordedAt])
   @@index([deviceId, metric, recordedAt])
   @@map("sensor_readings_raw")
+}
+
+// ─── Sensor Registry & Provisioning (Tachyon identity layer) ──────────────────
+//
+// SensorRegistry holds stable administrative identity for each sensor device.
+// ProvisioningEvent holds the append-only audit trail of lifecycle transitions.
+//
+// These two tables are the persistence target of the domain pipeline defined in
+// packages/domain/hardware/pipeline.ts and the types in types.ts. They are
+// Tachyon-native and completely separate from:
+//   SensorDevice      — UniFi/SensorPush polling path (do not mix)
+//   SensorReadingRaw  — live telemetry (admin identity does not belong there)
+
+/// Stable administrative identity record for a sensor device.
+/// Survives firmware reflashes, MAC changes, and re-provisioning cycles.
+/// Used by processSensorObservation() as the reconciliation registry snapshot.
+///
+/// Distinct from SensorDevice (UniFi polling path) — never cross-populate.
+/// Distinct from SensorReadingRaw (live telemetry) — this table is admin-only.
+model SensorRegistry {
+  id                 String    @id @default(uuid()) @db.Uuid
+  /// BeeKeeper stable asset identity — e.g. "BK-SEN-000241". Printed on QR label.
+  /// Globally unique. Survives firmware reflash, MAC changes, and re-provisioning.
+  assetId            String    @unique @map("asset_id")
+  /// Vendor/native device identifier — BLE name, serial number, QR code, etc.
+  /// Assigned by the vendor or hub at discovery time.
+  deviceIdentifier   String    @map("device_identifier")
+  vendor             String    // tachyon | sensorpush | ecowitt | mokosmart | fanstel | generic
+  model              String    // sc833f | s05t | hx711 | bme280 | inmp441 | generic
+  transport          String    // ble | gpio | csi | cloud | manual
+  /// Always "sensor" for rows in this table. Preserved for domain type alignment.
+  kind               String    @default("sensor")
+  name               String
+  /// Lifecycle stage — discovered | pending | provisioned | assigned |
+  ///                   unassigned | retired | unknown
+  lifecycleStatus    String    @default("discovered") @map("lifecycle_status")
+  /// Current BLE/transport MAC address. Nullable — changes on firmware reflash.
+  /// @unique: PostgreSQL treats each NULL as distinct, so multiple NULLs are
+  /// allowed while non-null values remain unique. This achieves the same
+  /// semantics as a partial unique index (WHERE current_mac_address IS NOT NULL)
+  /// without requiring a raw migration. The application layer additionally
+  /// enforces uniqueness via an in-transaction pre-flight check on relink_mac.
+  currentMacAddress  String?   @unique @map("current_mac_address")
+  hubId              String?   @map("hub_id") @db.Uuid
+  hiveId             String?   @map("hive_id") @db.Uuid
+  /// Device role — primary_environment | thermal_map | weight | audio |
+  ///               entrance_camera | apiary_camera | ambient_weather | unknown
+  role               String    @default("unknown")
+  pollingIntervalSec Int?      @map("polling_interval_sec")
+  firmwareVersion    String?   @map("firmware_version")
+  notes              String?
+  labelPrinted       Boolean   @default(false) @map("label_printed")
+  provisionedAt      DateTime? @map("provisioned_at")
+  assignedAt         DateTime? @map("assigned_at")
+  retiredAt          DateTime? @map("retired_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  hub                Hub?                @relation(fields: [hubId], references: [id], onDelete: SetNull)
+  hive               Hive?               @relation(fields: [hiveId], references: [id], onDelete: SetNull)
+  provisioningEvents ProvisioningEvent[]
+
+  @@index([lifecycleStatus])
+  @@index([hubId])
+  @@index([hiveId])
+  @@map("sensor_registry")
+}
+
+/// Append-only audit record for a lifecycle state transition on a SensorRegistry row.
+/// Written whenever a sensor moves through the provisioning or reconciliation pipeline.
+/// Never updated after creation — the entire table is an immutable audit log.
+/// actorId carries no @relation — provisioning events must survive user deletion.
+model ProvisioningEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  registryId String   @map("registry_id") @db.Uuid
+  /// Event kind — discovered | claimed | provisioned | assigned | reassigned |
+  ///              unassigned | mac_updated | firmware_updated | retired | reactivated
+  eventType  String   @map("event_type")
+  /// Actor who triggered this transition. Null for automated reconciliation.
+  /// No @relation — intentional: events must outlive user records.
+  actorId    String?  @map("actor_id") @db.Uuid
+  occurredAt DateTime @default(now()) @map("occurred_at")
+  payload    Json?
+
+  registry   SensorRegistry @relation(fields: [registryId], references: [id], onDelete: Cascade)
+
+  @@index([registryId, occurredAt])
+  @@index([eventType, occurredAt])
+  @@map("provisioning_events")
 }

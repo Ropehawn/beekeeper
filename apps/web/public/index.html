@@ -7730,10 +7730,25 @@
   async function confirmCameraAssign(deviceId, name) {
     var hiveId = document.getElementById('camera-assign-hive').value;
     try {
-      await BeeAPI.registerCameraDevice({ unifiDeviceId: deviceId, name: name, hiveId: hiveId });
+      try {
+        const mod = await import('/dist/pages/hardware-registry.js');
+        await mod.saveCameraAssignment({ unifiDeviceId: deviceId, name: name, hiveId: hiveId });
+        // State was refreshed inside saveCameraAssignment — render from it directly.
+        const state = mod.getRegistryPageState();
+        const tbody = document.getElementById('cameras-tbody');
+        if (tbody) mod.renderCameraRegistryTable(
+          tbody,
+          state.cameraDevices,
+          state.cameraDevicesLoad,
+          function(id) { return BeeAPI.getCameraSnapshotUrl(id) + '&t=' + Date.now(); }
+        );
+      } catch (_) {
+        // fallback: original BeeAPI path
+        await BeeAPI.registerCameraDevice({ unifiDeviceId: deviceId, name: name, hiveId: hiveId });
+        await refreshCamerasTableFromRegistry();
+      }
       showToast('Camera assigned');
       closeDiscoverModal();
-      refreshCamerasTableFromRegistry();
     } catch (e) {
       showToast('Failed: ' + e.message);
     }
@@ -7771,9 +7786,24 @@
 
   async function removeCameraDevice(id) {
     try {
-      await BeeAPI.deleteCameraDevice(id);
+      try {
+        const mod = await import('/dist/pages/hardware-registry.js');
+        await mod.removeCamera(id);
+        // State was refreshed inside removeCamera — render from it directly.
+        const state = mod.getRegistryPageState();
+        const tbody = document.getElementById('cameras-tbody');
+        if (tbody) mod.renderCameraRegistryTable(
+          tbody,
+          state.cameraDevices,
+          state.cameraDevicesLoad,
+          function(id) { return BeeAPI.getCameraSnapshotUrl(id) + '&t=' + Date.now(); }
+        );
+      } catch (_) {
+        // fallback: original BeeAPI path
+        await BeeAPI.deleteCameraDevice(id);
+        await refreshCamerasTableFromRegistry();
+      }
       showToast('Camera removed');
-      refreshCamerasTableFromRegistry();
     } catch (e) { showToast('Failed: ' + e.message); }
   }
 
@@ -8026,14 +8056,30 @@
     if (btn) btn.disabled = true;
 
     try {
-      await BeeAPI.registerSensorDevice({
-        name,
-        unifiDeviceId: deviceId,
-        hiveId: hiveId || undefined,
-        pollInterval: 60,
-      });
+      try {
+        const mod = await import('/dist/pages/hardware-registry.js');
+        await mod.saveSensorAssignment({
+          name,
+          unifiDeviceId: deviceId,
+          hiveId: hiveId || undefined,
+          pollInterval: 60,
+        });
+        // State was refreshed inside saveSensorAssignment — render from it directly.
+        const state = mod.getRegistryPageState();
+        const tbody = document.getElementById('sensors-tbody');
+        if (tbody) mod.renderRegistryTable(tbody, state.sensorDevices, state.sensorDevicesLoad);
+        registeredDeviceIds = new Set(state.sensorDevices.map(function(d) { return d.deviceId; }));
+      } catch (_) {
+        // fallback: original BeeAPI path
+        await BeeAPI.registerSensorDevice({
+          name,
+          unifiDeviceId: deviceId,
+          hiveId: hiveId || undefined,
+          pollInterval: 60,
+        });
+        await refreshSensorsTableFromRegistry();
+      }
       closeAssignModal();
-      await refreshSensorsTableFromRegistry();
       showToast('✅ ' + name + ' assigned');
     } catch (e) {
       showToast('⚠️ ' + (e.message || 'Could not save assignment'));
@@ -8164,8 +8210,19 @@
   async function removeSensorDevice(id, name) {
     if (!confirm('Remove "' + name + '"?\nThis will stop sensor readings for the linked hive.')) return;
     try {
-      await BeeAPI.deleteSensorDevice(id);
-      await refreshSensorsTableFromRegistry();
+      try {
+        const mod = await import('/dist/pages/hardware-registry.js');
+        await mod.removeSensor(id);
+        // State was refreshed inside removeSensor — render from it directly.
+        const state = mod.getRegistryPageState();
+        const tbody = document.getElementById('sensors-tbody');
+        if (tbody) mod.renderRegistryTable(tbody, state.sensorDevices, state.sensorDevicesLoad);
+        registeredDeviceIds = new Set(state.sensorDevices.map(function(d) { return d.deviceId; }));
+      } catch (_) {
+        // fallback: original BeeAPI path
+        await BeeAPI.deleteSensorDevice(id);
+        await refreshSensorsTableFromRegistry();
+      }
       showToast('✅ ' + name + ' removed');
     } catch (e) {
       showToast('⚠️ ' + (e.message || 'Could not remove sensor'));
