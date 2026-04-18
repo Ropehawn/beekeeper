@@ -211,7 +211,10 @@ export type ProvisioningEventType =
   | 'mac_updated'
   | 'firmware_updated'
   | 'retired'
-  | 'reactivated';
+  | 'reactivated'
+  // Written by the DB adapter when processSensorObservation() returns
+  // link_confirmed — the device was recognised and nothing needed to change.
+  | 'identity_confirmed';
 
 // A stable registry record for a sensor. Represents the device's
 // administrative identity and current lifecycle state. Does not
