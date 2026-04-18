@@ -40,6 +40,8 @@ import {
   runCameraDiscovery,
   assignSensorToHive,
   removeSensorDevice as deleteSensorDeviceApi,
+  assignCameraToHive,
+  removeCameraDevice as deleteCameraDeviceApi,
 } from '../adapters/hardware-registry';
 
 // ---------------------------------------------------------------------------
@@ -297,6 +299,37 @@ export async function saveSensorAssignment(data: {
 export async function removeSensor(id: string): Promise<void> {
   await deleteSensorDeviceApi(id);
   await refreshSensorDevices();
+}
+
+// ---------------------------------------------------------------------------
+// Camera write actions
+// Same pattern as sensor write actions: API mutation then state refresh.
+// ---------------------------------------------------------------------------
+
+/**
+ * Register a camera and assign it to a hive.
+ * Wraps assignCameraToHive() then refreshes cameraDevices state.
+ *
+ * Throws on API failure — callers must catch and surface the error.
+ */
+export async function saveCameraAssignment(data: {
+  unifiDeviceId: string;
+  name: string;
+  hiveId?: string;
+}): Promise<void> {
+  await assignCameraToHive(data);
+  await refreshCameraDevices();
+}
+
+/**
+ * Remove a registered camera device.
+ * Wraps removeCameraDevice() then refreshes cameraDevices state.
+ *
+ * Throws on API failure — callers must catch and surface the error.
+ */
+export async function removeCamera(id: string): Promise<void> {
+  await deleteCameraDeviceApi(id);
+  await refreshCameraDevices();
 }
 
 // ---------------------------------------------------------------------------

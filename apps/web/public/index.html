@@ -7730,10 +7730,25 @@
   async function confirmCameraAssign(deviceId, name) {
     var hiveId = document.getElementById('camera-assign-hive').value;
     try {
-      await BeeAPI.registerCameraDevice({ unifiDeviceId: deviceId, name: name, hiveId: hiveId });
+      try {
+        const mod = await import('/dist/pages/hardware-registry.js');
+        await mod.saveCameraAssignment({ unifiDeviceId: deviceId, name: name, hiveId: hiveId });
+        // State was refreshed inside saveCameraAssignment — render from it directly.
+        const state = mod.getRegistryPageState();
+        const tbody = document.getElementById('cameras-tbody');
+        if (tbody) mod.renderCameraRegistryTable(
+          tbody,
+          state.cameraDevices,
+          state.cameraDevicesLoad,
+          function(id) { return BeeAPI.getCameraSnapshotUrl(id) + '&t=' + Date.now(); }
+        );
+      } catch (_) {
+        // fallback: original BeeAPI path
+        await BeeAPI.registerCameraDevice({ unifiDeviceId: deviceId, name: name, hiveId: hiveId });
+        await refreshCamerasTableFromRegistry();
+      }
       showToast('Camera assigned');
       closeDiscoverModal();
-      refreshCamerasTableFromRegistry();
     } catch (e) {
       showToast('Failed: ' + e.message);
     }
@@ -7771,9 +7786,24 @@
 
   async function removeCameraDevice(id) {
     try {
-      await BeeAPI.deleteCameraDevice(id);
+      try {
+        const mod = await import('/dist/pages/hardware-registry.js');
+        await mod.removeCamera(id);
+        // State was refreshed inside removeCamera — render from it directly.
+        const state = mod.getRegistryPageState();
+        const tbody = document.getElementById('cameras-tbody');
+        if (tbody) mod.renderCameraRegistryTable(
+          tbody,
+          state.cameraDevices,
+          state.cameraDevicesLoad,
+          function(id) { return BeeAPI.getCameraSnapshotUrl(id) + '&t=' + Date.now(); }
+        );
+      } catch (_) {
+        // fallback: original BeeAPI path
+        await BeeAPI.deleteCameraDevice(id);
+        await refreshCamerasTableFromRegistry();
+      }
       showToast('Camera removed');
-      refreshCamerasTableFromRegistry();
     } catch (e) { showToast('Failed: ' + e.message); }
   }
 
