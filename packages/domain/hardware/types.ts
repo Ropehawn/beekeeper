@@ -320,6 +320,131 @@ export interface RegistrySearchResult {
   query: RegistrySearchQuery;
 }
 
+// ---------------------------------------------------------------------------
+// Tachyon-native sensor identity reconciliation types
+//
+// These types describe the identity reconciliation layer that sits between
+// Tachyon discovery events and the BeeKeeper registry. A Tachyon hub may
+// observe a sensor via any combination of three signals:
+//
+//   assetId           — scanned from a physical QR label (strongest, stable)
+//   deviceIdentifier  — advertised by the vendor firmware (strong, may be null)
+//   observedMacAddress — seen at the transport layer (weak, changes on reflash)
+//
+// reconcileSensorIdentity() in actions.ts uses these types to produce a
+// SensorReconciliationResult that callers can act on without ambiguity.
+// ---------------------------------------------------------------------------
+
+/**
+ * The type of match found when reconciling an observed sensor against
+ * the registry. Each value represents a distinct outcome in the decision tree.
+ */
+export type ReconciliationMatchType =
+  | 'exact_match'          // observation matches a registry record with no conflicts
+  | 'mac_change'           // assetId matched but MAC differs (firmware reflash / swap)
+  | 'identifier_match'     // matched by deviceIdentifier only; no assetId on observation
+  | 'ambiguous_match'      // multiple candidates found — human must resolve
+  | 'new_unlinked_device'; // no match found; device is not yet in the registry
+
+/**
+ * The specific signal that drove the reconciliation outcome.
+ * Provides an audit-readable reason alongside the match type.
+ */
+export type ReconciliationReason =
+  | 'asset_id_exact'            // assetId matched a registry record; MAC consistent
+  | 'asset_id_with_mac_change'  // assetId matched; MAC in registry differs from observed
+  | 'device_identifier_match'   // deviceIdentifier matched a single registry record
+  | 'mac_address_match'         // MAC matched a single registry record; no assetId present
+  | 'multiple_candidates'       // more than one record matched — cannot auto-resolve
+  | 'no_candidates';            // no registry record matched any available signal
+
+/**
+ * An observed sensor identity snapshot — the set of signals that a Tachyon
+ * hub can report about a device at discovery or periodic scan time.
+ *
+ * All three identity fields are nullable because discovery paths vary:
+ *   - QR scan   → assetId known; MAC and identifier may not be available yet
+ *   - BLE advert → MAC + identifier visible; no assetId unless device broadcasts it
+ *   - Cloud poll  → identifier present; MAC may be hidden by the cloud layer
+ */
+export interface SensorIdentityObservation {
+  /** BeeKeeper stable identity scanned from QR label or advertised by device. */
+  assetId: AssetId | null;
+  /** Vendor/native device identifier (BLE name, serial number, etc.). */
+  deviceIdentifier: string | null;
+  /** MAC address seen at this observation moment (transport identity). */
+  observedMacAddress: string | null;
+  /** When this observation was captured (ISO 8601). */
+  observedAt: TimestampISO;
+}
+
+/**
+ * The result of reconciling a SensorIdentityObservation against the registry.
+ *
+ * Always explicit — callers must read matchType and manualReviewRequired
+ * before taking any action. Never silently auto-links ambiguous cases.
+ */
+export interface SensorReconciliationResult {
+  matchType: ReconciliationMatchType;
+  reason: ReconciliationReason;
+  /** The matched registry record. Null for ambiguous_match and new_unlinked_device. */
+  matchedRecord: SensorRegistryRecord | null;
+  /** The MAC stored in the registry at reconciliation time (normalized, uppercase). */
+  previousMac: string | null;
+  /** The MAC seen in this observation (normalized, uppercase). */
+  observedMac: string | null;
+  /**
+   * True when the matched record's MAC should be updated to observedMac.
+   * Only true for mac_change and identifier_match-with-different-MAC cases.
+   */
+  relinkRequired: boolean;
+  /**
+   * True when this result must not be acted on without human confirmation.
+   * Always true for ambiguous_match; never true for new_unlinked_device.
+   */
+  manualReviewRequired: boolean;
+  /**
+   * All candidate records considered during reconciliation.
+   * Non-empty for ambiguous_match — useful for building a conflict-resolution UI.
+   * Sorted deterministically by record.id (ascending) so callers receive a stable
+   * ordering regardless of the order in which records were passed to the function.
+   */
+  candidates: SensorRegistryRecord[];
+  /**
+   * True when a higher-tier signal resolved to a matched record, but a
+   * lower-tier signal (typically observedMacAddress) pointed to a *different*
+   * registry record at the same time.
+   *
+   * Does NOT change matchType — the higher-tier match still wins.
+   * Does NOT block buildAssetLinkIntent.
+   * Exists purely to surface the disagreement for audit trails, operator
+   * review, and callers that want to run a MAC uniqueness pre-flight before
+   * executing relinkRequired.
+   *
+   * Always false for ambiguous_match and new_unlinked_device.
+   */
+  crossTierConflict: boolean;
+}
+
+/**
+ * An intent to link a discovered observation to an existing registry record.
+ * Built by buildAssetLinkIntent() from a resolved SensorReconciliationResult.
+ *
+ * This is a pure value object — callers execute it against the persistence layer.
+ */
+export interface AssetLinkIntent {
+  /** The registry record to update. */
+  registryId: UUID;
+  /** The observed MAC address to write to the record (may be null). */
+  observedMacAddress: string | null;
+  /** The vendor identifier to write to the record (may be null). */
+  deviceIdentifier: string | null;
+  /** The actor who initiated the link (null for automated reconciliation). */
+  actorId: UUID | null;
+  /** When this intent was created (ISO 8601). */
+  linkedAt: TimestampISO;
+}
+
 // A flat row for CSV export of registry records.
 // All values are strings to survive spreadsheet round-trips.
 export interface CsvExportRow {

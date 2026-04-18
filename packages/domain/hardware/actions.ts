@@ -13,6 +13,10 @@ import type {
   AssetId,
   AssetIdParts,
   AssetIdPrefix,
+  SensorRegistryRecord,
+  SensorIdentityObservation,
+  SensorReconciliationResult,
+  AssetLinkIntent,
 } from './types';
 import {
   ASSET_ID_PREFIX,
@@ -249,4 +253,243 @@ export function parseAssetId(assetId: string): AssetIdParts | null {
 
 export function isValidAssetId(assetId: string): boolean {
   return ASSET_ID_REGEX.test(assetId);
+}
+
+// ---------------------------------------------------------------------------
+// Tachyon-native sensor identity reconciliation
+// ---------------------------------------------------------------------------
+
+/** Sort registry records by id ascending — stable, input-order-independent. */
+function sortById(records: SensorRegistryRecord[]): SensorRegistryRecord[] {
+  return records.slice().sort((a, b) => (a.id < b.id ? -1 : 1));
+}
+
+/**
+ * Reconcile a Tachyon SensorIdentityObservation against the sensor registry.
+ *
+ * Decision tree (highest-confidence signal evaluated first):
+ *
+ *   1. assetId present
+ *      └─ 0 registry matches → fall through to step 2
+ *      └─ 2+ matches (data error) → ambiguous_match / multiple_candidates
+ *      └─ 1 match, MAC consistent (or no MAC to compare) → exact_match / asset_id_exact
+ *      └─ 1 match, MAC differs → mac_change / asset_id_with_mac_change, relinkRequired
+ *
+ *   2. deviceIdentifier present
+ *      └─ 0 matches → fall through to step 3
+ *      └─ 2+ matches → ambiguous_match / multiple_candidates
+ *      └─ 1 match → identifier_match / device_identifier_match
+ *                   (relinkRequired if MAC also differs)
+ *
+ *   3. observedMacAddress present
+ *      └─ 0 matches → fall through to step 4
+ *      └─ 2+ matches → ambiguous_match / multiple_candidates
+ *      └─ 1 match → exact_match / mac_address_match
+ *
+ *   4. No signal matched → new_unlinked_device / no_candidates
+ *
+ * Rules:
+ *   - Never silently acts on ambiguous results (manualReviewRequired = true)
+ *   - assetId is trusted over MAC — a MAC change on a known assetId is auto-resolvable
+ *   - A null observed MAC is not treated as a MAC conflict (absence ≠ mismatch)
+ *   - Returns an explicit result object for every case; never throws or returns null
+ */
+export function reconcileSensorIdentity(
+  records: SensorRegistryRecord[],
+  observation: SensorIdentityObservation,
+): SensorReconciliationResult {
+  const normalizedObservedMac =
+    observation.observedMacAddress?.toUpperCase().trim() ?? null;
+
+  // ── Step 1: match by assetId ─────────────────────────────────────────────
+  if (observation.assetId !== null) {
+    const byAssetId = records.filter((r) => r.assetId === observation.assetId);
+
+    if (byAssetId.length > 1) {
+      // assetId should be globally unique — data integrity issue.
+      return {
+        matchType: 'ambiguous_match',
+        reason: 'multiple_candidates',
+        matchedRecord: null,
+        previousMac: null,
+        observedMac: normalizedObservedMac,
+        relinkRequired: false,
+        manualReviewRequired: true,
+        crossTierConflict: false,
+        candidates: sortById(byAssetId),
+      };
+    }
+
+    if (byAssetId.length === 1) {
+      const record = byAssetId[0];
+      const normalizedRecordMac =
+        record.currentMacAddress?.toUpperCase().trim() ?? null;
+
+      // MAC "changed" only when both sides are non-null and differ.
+      // A null observation MAC means the transport layer didn't report one —
+      // not a conflict.
+      const macChanged =
+        normalizedObservedMac !== null &&
+        normalizedRecordMac !== null &&
+        normalizedObservedMac !== normalizedRecordMac;
+
+      // Cross-tier conflict: does the observed MAC belong to a *different*
+      // registry record? If so, executing relinkRequired without a uniqueness
+      // check would produce a MAC collision in the registry.
+      const crossTierConflict =
+        normalizedObservedMac !== null &&
+        records.some(
+          (r) =>
+            r.id !== record.id &&
+            r.currentMacAddress?.toUpperCase().trim() === normalizedObservedMac,
+        );
+
+      return {
+        matchType: macChanged ? 'mac_change' : 'exact_match',
+        reason: macChanged ? 'asset_id_with_mac_change' : 'asset_id_exact',
+        matchedRecord: record,
+        previousMac: normalizedRecordMac,
+        observedMac: normalizedObservedMac,
+        relinkRequired: macChanged,
+        manualReviewRequired: false,
+        crossTierConflict,
+        candidates: [record],
+      };
+    }
+    // byAssetId.length === 0 — assetId not yet in registry; fall through.
+  }
+
+  // ── Step 2: match by deviceIdentifier ───────────────────────────────────
+  if (observation.deviceIdentifier !== null) {
+    const byIdentifier = records.filter(
+      (r) => r.deviceIdentifier === observation.deviceIdentifier,
+    );
+
+    if (byIdentifier.length > 1) {
+      return {
+        matchType: 'ambiguous_match',
+        reason: 'multiple_candidates',
+        matchedRecord: null,
+        previousMac: null,
+        observedMac: normalizedObservedMac,
+        relinkRequired: false,
+        manualReviewRequired: true,
+        crossTierConflict: false,
+        candidates: sortById(byIdentifier),
+      };
+    }
+
+    if (byIdentifier.length === 1) {
+      const record = byIdentifier[0];
+      const normalizedRecordMac =
+        record.currentMacAddress?.toUpperCase().trim() ?? null;
+
+      // MAC differs on an identifier match → a relink is needed but not
+      // ambiguous (the identifier is the authoritative signal here).
+      const relinkRequired =
+        normalizedObservedMac !== null &&
+        normalizedRecordMac !== null &&
+        normalizedObservedMac !== normalizedRecordMac;
+
+      // Cross-tier conflict: the observed MAC points to a different record.
+      const crossTierConflict =
+        normalizedObservedMac !== null &&
+        records.some(
+          (r) =>
+            r.id !== record.id &&
+            r.currentMacAddress?.toUpperCase().trim() === normalizedObservedMac,
+        );
+
+      return {
+        matchType: 'identifier_match',
+        reason: 'device_identifier_match',
+        matchedRecord: record,
+        previousMac: normalizedRecordMac,
+        observedMac: normalizedObservedMac,
+        relinkRequired,
+        manualReviewRequired: false,
+        crossTierConflict,
+        candidates: [record],
+      };
+    }
+    // byIdentifier.length === 0 — fall through.
+  }
+
+  // ── Step 3: match by MAC address (transport identity, last resort) ───────
+  if (normalizedObservedMac !== null) {
+    const byMac = records.filter(
+      (r) =>
+        r.currentMacAddress?.toUpperCase().trim() === normalizedObservedMac,
+    );
+
+    if (byMac.length > 1) {
+      return {
+        matchType: 'ambiguous_match',
+        reason: 'multiple_candidates',
+        matchedRecord: null,
+        previousMac: null,
+        observedMac: normalizedObservedMac,
+        relinkRequired: false,
+        manualReviewRequired: true,
+        crossTierConflict: false,
+        candidates: sortById(byMac),
+      };
+    }
+
+    if (byMac.length === 1) {
+      const record = byMac[0];
+      return {
+        matchType: 'exact_match',
+        reason: 'mac_address_match',
+        matchedRecord: record,
+        previousMac: normalizedObservedMac, // matched on this MAC — same value
+        observedMac: normalizedObservedMac,
+        relinkRequired: false,
+        manualReviewRequired: false,
+        crossTierConflict: false,
+        candidates: [record],
+      };
+    }
+  }
+
+  // ── Step 4: no signal matched ─────────────────────────────────────────────
+  return {
+    matchType: 'new_unlinked_device',
+    reason: 'no_candidates',
+    matchedRecord: null,
+    previousMac: null,
+    observedMac: normalizedObservedMac,
+    relinkRequired: false,
+    manualReviewRequired: false,
+    crossTierConflict: false,
+    candidates: [],
+  };
+}
+
+/**
+ * Build an AssetLinkIntent from a resolved SensorReconciliationResult.
+ *
+ * Returns null when:
+ *   - matchedRecord is null (ambiguous_match or new_unlinked_device)
+ *   - manualReviewRequired is true (caller must obtain human confirmation first)
+ *
+ * Pass the original observation so the intent carries the deviceIdentifier
+ * that Tachyon reported — useful for updating stale registry fields.
+ */
+export function buildAssetLinkIntent(
+  result: SensorReconciliationResult,
+  observation: SensorIdentityObservation,
+  actorId: UUID | null,
+  nowISO: TimestampISO,
+): AssetLinkIntent | null {
+  if (result.matchedRecord === null) return null;
+  if (result.manualReviewRequired) return null;
+
+  return {
+    registryId: result.matchedRecord.id,
+    observedMacAddress: result.observedMac,
+    deviceIdentifier: observation.deviceIdentifier,
+    actorId,
+    linkedAt: nowISO,
+  };
 }

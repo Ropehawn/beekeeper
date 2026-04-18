@@ -2,6 +2,7 @@
 import type {
   UUID,
   TimestampISO,
+  AssetId,
   DeviceRole,
   ConnectionStatus,
   SignalFreshness,
@@ -523,4 +524,126 @@ export function findDiscoveryMatches(
   return matches.sort(
     (a, b) => STRENGTH_RANK[a.strength] - STRENGTH_RANK[b.strength],
   );
+}
+
+// ---------------------------------------------------------------------------
+// Identity reconciliation selectors
+// Support lookups needed by reconcileSensorIdentity() (actions.ts) and
+// by UI layers that want to pre-fetch candidates before reconciling.
+// ---------------------------------------------------------------------------
+
+/**
+ * Find a registry record by BeeKeeper stable assetId.
+ *
+ * Returns the first matching record, or null if not found.
+ * assetId is expected to be globally unique; if duplicates exist,
+ * reconcileSensorIdentity() will surface them as ambiguous_match.
+ */
+export function registryRecordByAssetId(
+  records: SensorRegistryRecord[],
+  assetId: AssetId,
+): SensorRegistryRecord | null {
+  return records.find((r) => r.assetId === assetId) ?? null;
+}
+
+/**
+ * Find all registry records whose stored MAC address matches the given value.
+ *
+ * Returns an array rather than a single record to expose duplicate/ambiguous
+ * cases. Callers should treat length > 1 as an ambiguous match requiring
+ * manual review. Normalizes both sides to uppercase before comparison.
+ */
+export function registryRecordsByMac(
+  records: SensorRegistryRecord[],
+  mac: string,
+): SensorRegistryRecord[] {
+  const normalized = mac.toUpperCase().trim();
+  return records.filter(
+    (r) => r.currentMacAddress?.toUpperCase().trim() === normalized,
+  );
+}
+
+/**
+ * Find all registry records matching the given deviceIdentifier.
+ *
+ * Mirrors registryRecordsByDeviceIdentifier (which already exists above) but
+ * is re-exported here as part of the identity reconciliation selector group
+ * for discoverability. Identical implementation; callers may use either.
+ *
+ * Returns an array — treat length > 1 as ambiguous.
+ */
+export function registryRecordsByIdentifier(
+  records: SensorRegistryRecord[],
+  deviceIdentifier: string,
+): SensorRegistryRecord[] {
+  return records.filter((r) => r.deviceIdentifier === deviceIdentifier);
+}
+
+/**
+ * Rank a set of candidate registry records by how likely they are to be
+ * the same physical device as the given observation.
+ *
+ * Ranking criteria (descending priority):
+ *   1. assetId match         — stable physical identity (highest confidence)
+ *   2. deviceIdentifier match — vendor/native identity
+ *   3. MAC match              — transport identity (weakest, may change)
+ *
+ * Records that match none of the signals are excluded from the result.
+ * Deterministic: ties are broken by record.id (lexicographic) so the
+ * ordering is stable across calls with the same inputs.
+ */
+export interface RankedCandidate {
+  record: SensorRegistryRecord;
+  /** Lower = higher confidence. 0 = assetId, 1 = identifier, 2 = mac */
+  rank: number;
+}
+
+export function rankIdentityCandidates(
+  records: SensorRegistryRecord[],
+  assetId: AssetId | null,
+  deviceIdentifier: string | null,
+  observedMac: string | null,
+): RankedCandidate[] {
+  const normalizedMac = observedMac?.toUpperCase().trim() ?? null;
+  const seen = new Set<string>();
+  const ranked: RankedCandidate[] = [];
+
+  // Rank 0: assetId match
+  if (assetId !== null) {
+    for (const r of records) {
+      if (r.assetId === assetId && !seen.has(r.id)) {
+        seen.add(r.id);
+        ranked.push({ record: r, rank: 0 });
+      }
+    }
+  }
+
+  // Rank 1: deviceIdentifier match
+  if (deviceIdentifier !== null) {
+    for (const r of records) {
+      if (r.deviceIdentifier === deviceIdentifier && !seen.has(r.id)) {
+        seen.add(r.id);
+        ranked.push({ record: r, rank: 1 });
+      }
+    }
+  }
+
+  // Rank 2: MAC match
+  if (normalizedMac !== null) {
+    for (const r of records) {
+      if (
+        r.currentMacAddress?.toUpperCase().trim() === normalizedMac &&
+        !seen.has(r.id)
+      ) {
+        seen.add(r.id);
+        ranked.push({ record: r, rank: 2 });
+      }
+    }
+  }
+
+  // Stable tie-break within each rank group by record.id
+  return ranked.sort((a, b) => {
+    if (a.rank !== b.rank) return a.rank - b.rank;
+    return a.record.id < b.record.id ? -1 : 1;
+  });
 }
