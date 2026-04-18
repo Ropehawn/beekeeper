@@ -445,6 +445,87 @@ export interface AssetLinkIntent {
   linkedAt: TimestampISO;
 }
 
+// ---------------------------------------------------------------------------
+// Tachyon ingestion pipeline types
+//
+// These types describe the output of the pure processing pipeline that sits
+// between a raw Tachyon observation event and the persistence layer.
+// processSensorObservation() in pipeline.ts produces a SensorProcessingResult
+// for every observation; callers use it to decide what to write without any
+// additional business logic.
+// ---------------------------------------------------------------------------
+
+/**
+ * The recommended action the pipeline caller should take after processing.
+ *
+ * Derived from the reconciliation result and pipeline safety rules.
+ * A clean switch target for route handlers and job runners.
+ *
+ *   link_confirmed      — matched record, no conflicts; safe to write link
+ *   relink_mac          — matched record, MAC changed; safe to write link + MAC
+ *   register_new        — no registry record; send device to provisioning workflow
+ *   hold_for_mac_conflict — crossTierConflict: observed MAC owned by different
+ *                          record; human must resolve before writing
+ *   needs_manual_review — ambiguous_match: multiple candidates; human must pick
+ */
+export type PipelineAction =
+  | 'link_confirmed'
+  | 'relink_mac'
+  | 'register_new'
+  | 'hold_for_mac_conflict'
+  | 'needs_manual_review';
+
+/**
+ * The complete result of running a Tachyon observation through the pipeline.
+ *
+ * Carries the raw reconciliation result plus pipeline-layer decisions and flags.
+ * Callers should treat this as the single source of truth for what to do next —
+ * never re-derive flags from the nested reconciliation fields.
+ */
+export interface SensorProcessingResult {
+  /** Raw reconciliation output — unchanged; always present. */
+  reconciliation: SensorReconciliationResult;
+
+  /** What the pipeline recommends the caller do next. */
+  action: PipelineAction;
+
+  /**
+   * The write intent to execute against the registry.
+   * Null when action is register_new, needs_manual_review, or hold_for_mac_conflict.
+   * When non-null, it is safe to persist without further safety checks.
+   */
+  linkIntent: AssetLinkIntent | null;
+
+  /**
+   * True when linkIntent is non-null — there is a safe, auto-executable write.
+   * Derived directly from linkIntent !== null; provided as a convenience flag.
+   */
+  shouldPersist: boolean;
+
+  /**
+   * True when the matched record's MAC address should be updated to observedMac.
+   * False when crossTierConflict is true even if relinkRequired is true —
+   * the observed MAC is owned by another record and must not be written blindly.
+   */
+  shouldRelink: boolean;
+
+  /**
+   * True when the observation cannot be acted on automatically.
+   * Set when:
+   *   - reconciliation.manualReviewRequired (ambiguous_match)
+   *   - reconciliation.crossTierConflict (MAC collision risk)
+   * Callers must route requiresManualReview=true results to human review queue.
+   */
+  requiresManualReview: boolean;
+
+  /**
+   * Human-readable one-line description of the outcome.
+   * Safe for structured logs and future conflict-resolution UI tooltips.
+   * Format: [matchType/reason] <identity> → <outcome> [FLAGS]
+   */
+  summary: string;
+}
+
 // A flat row for CSV export of registry records.
 // All values are strings to survive spreadsheet round-trips.
 export interface CsvExportRow {
