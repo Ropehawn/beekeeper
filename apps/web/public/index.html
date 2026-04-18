@@ -8026,14 +8026,30 @@
     if (btn) btn.disabled = true;
 
     try {
-      await BeeAPI.registerSensorDevice({
-        name,
-        unifiDeviceId: deviceId,
-        hiveId: hiveId || undefined,
-        pollInterval: 60,
-      });
+      try {
+        const mod = await import('/dist/pages/hardware-registry.js');
+        await mod.saveSensorAssignment({
+          name,
+          unifiDeviceId: deviceId,
+          hiveId: hiveId || undefined,
+          pollInterval: 60,
+        });
+        // State was refreshed inside saveSensorAssignment — render from it directly.
+        const state = mod.getRegistryPageState();
+        const tbody = document.getElementById('sensors-tbody');
+        if (tbody) mod.renderRegistryTable(tbody, state.sensorDevices, state.sensorDevicesLoad);
+        registeredDeviceIds = new Set(state.sensorDevices.map(function(d) { return d.deviceId; }));
+      } catch (_) {
+        // fallback: original BeeAPI path
+        await BeeAPI.registerSensorDevice({
+          name,
+          unifiDeviceId: deviceId,
+          hiveId: hiveId || undefined,
+          pollInterval: 60,
+        });
+        await refreshSensorsTableFromRegistry();
+      }
       closeAssignModal();
-      await refreshSensorsTableFromRegistry();
       showToast('✅ ' + name + ' assigned');
     } catch (e) {
       showToast('⚠️ ' + (e.message || 'Could not save assignment'));
@@ -8164,8 +8180,19 @@
   async function removeSensorDevice(id, name) {
     if (!confirm('Remove "' + name + '"?\nThis will stop sensor readings for the linked hive.')) return;
     try {
-      await BeeAPI.deleteSensorDevice(id);
-      await refreshSensorsTableFromRegistry();
+      try {
+        const mod = await import('/dist/pages/hardware-registry.js');
+        await mod.removeSensor(id);
+        // State was refreshed inside removeSensor — render from it directly.
+        const state = mod.getRegistryPageState();
+        const tbody = document.getElementById('sensors-tbody');
+        if (tbody) mod.renderRegistryTable(tbody, state.sensorDevices, state.sensorDevicesLoad);
+        registeredDeviceIds = new Set(state.sensorDevices.map(function(d) { return d.deviceId; }));
+      } catch (_) {
+        // fallback: original BeeAPI path
+        await BeeAPI.deleteSensorDevice(id);
+        await refreshSensorsTableFromRegistry();
+      }
       showToast('✅ ' + name + ' removed');
     } catch (e) {
       showToast('⚠️ ' + (e.message || 'Could not remove sensor'));
