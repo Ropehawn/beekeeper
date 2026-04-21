@@ -20,7 +20,7 @@
 // Resolution types implemented:
 //   "provision"        — register_new items only (Step 3)
 //   "select_candidate" — needs_manual_review items (Step 4)
-//   "force_relink"     — hold_for_mac_conflict items (Step 5, not yet implemented)
+//   "force_relink"     — hold_for_mac_conflict items (Step 5)
 //
 // Auth: requireAuth + requireRole("queen", "worker") on all endpoints.
 
@@ -32,8 +32,10 @@ import { requireAuth, requireRole, AuthRequest } from "../middleware/auth";
 import {
   persistProvisionNew,
   persistSelectCandidate,
+  persistForceRelink,
   AssetIdConflictError,
   MacCollisionError,
+  RetiredRecordError,
 } from "../lib/sensor-registry-db";
 import { isValidAssetId } from "../../../../packages/domain/hardware/actions";
 
@@ -191,6 +193,17 @@ const selectCandidateBodySchema = z.object({
   resolution: z.literal("select_candidate"),
   // UUID of the registry record the operator has chosen from the candidates list.
   registryId: z.string().uuid(),
+});
+
+// POST /resolve — "force_relink" body
+//
+// No operator-supplied fields beyond resolution type. The contested MAC,
+// target record, and hub context are derived entirely from the queue item's
+// stored reconciliation payload. Allowing the operator to override these
+// would open a confused-deputy path where the MAC is forced onto an arbitrary
+// record rather than the one the pipeline matched.
+const forceRelinkBodySchema = z.object({
+  resolution: z.literal("force_relink"),
 });
 
 // ---------------------------------------------------------------------------
@@ -376,7 +389,11 @@ router.post(
 //                        by reconciliation.relinkRequired stored in the payload)
 //                        and seals the queue item — all in a single transaction.
 //
-// "force_relink" (hold_for_mac_conflict) is Step 5 and is not yet implemented.
+//   "force_relink"     — hold_for_mac_conflict items only. Operator confirms the
+//                        contested MAC belongs to the matched record (A). Revokes
+//                        the MAC from whoever currently holds it (B, if any),
+//                        assigns it to A, writes audit events for both records,
+//                        and seals the queue item — all in a single transaction.
 //
 // Guard sequence — provision:
 //   1. Validate :id UUID
@@ -400,15 +417,29 @@ router.post(
 //   8. persistSelectCandidate() — transaction (relinkRequired path or confirm path)
 //      MacCollisionError → 409 | other → 500
 //
+// Guard sequence — force_relink:
+//   1. Validate :id UUID
+//   2. Pre-check resolution type — 400 if unsupported
+//   3. Zod validation of force_relink body (no fields beyond resolution type)
+//   4. Load queue item — 404 if missing/wrong type
+//   5. processedAt null check — 409 if already processed
+//   6. payload.action === 'hold_for_mac_conflict' — 409 otherwise
+//   7. payload.reconciliation.matchedRecordId non-null — 500 if violated
+//   8. payload.reconciliation.observedMac non-null — 500 if violated
+//   9. persistForceRelink() — transaction (revoke B's MAC, assign to A, audit both, seal)
+//      RetiredRecordError → 409 | other → 500
+//
 // Returns (provision):
 //   201  { ok, resolution, createdRegistryId, assetId, processedAt }
 // Returns (select_candidate):
 //   200  { ok, resolution, selectedRegistryId, relinkPerformed, processedAt }
-// Errors (both):
+// Returns (force_relink):
+//   200  { ok, resolution, targetRegistryId, revokedFromRegistryId, processedAt }
+// Errors (all):
 //   400  invalid input or unsupported resolution type
 //   404  item not found or wrong event type
-//   409  already processed | conflict | wrong action type | not a candidate
-//   500  unexpected error
+//   409  already processed | conflict | wrong action type | retired record
+//   500  unexpected error | pipeline invariant violation
 
 router.post(
   "/review-queue/:id/resolve",
@@ -424,11 +455,15 @@ router.post(
     // Pre-check resolution type before running the full Zod parse.
     // Keeps the error clear and makes it trivial to add new resolution types later.
     const resolutionType = req.body?.resolution;
-    if (resolutionType !== "provision" && resolutionType !== "select_candidate") {
+    if (
+      resolutionType !== "provision" &&
+      resolutionType !== "select_candidate" &&
+      resolutionType !== "force_relink"
+    ) {
       return res.status(400).json({
         error:     "Unsupported or missing resolution type",
         received:  resolutionType ?? null,
-        supported: ["provision", "select_candidate"],
+        supported: ["provision", "select_candidate", "force_relink"],
       });
     }
 
@@ -553,10 +588,7 @@ router.post(
     }
 
     // ── select_candidate path ─────────────────────────────────────────────────
-    // resolutionType === "select_candidate" here — the pre-check above guarantees
-    // the value is one of ["provision", "select_candidate"] and the provision block
-    // always returns before reaching this point.
-
+    if (resolutionType === "select_candidate") {
     const parsedSC = selectCandidateBodySchema.safeParse(req.body);
     if (!parsedSC.success) {
       return res.status(400).json({
@@ -674,6 +706,117 @@ router.post(
       logger.error(
         { err: (err as Error).message, stack: (err as Error).stack, eventId: id },
         "sensor-identity-queue: unexpected error during select_candidate resolve",
+      );
+      return res.status(500).json({ error: "Internal server error" });
+    }
+    } // end select_candidate
+
+    // ── force_relink path ─────────────────────────────────────────────────────
+    // resolutionType === "force_relink" here — the pre-check guarantees the value
+    // is one of the three supported types; provision and select_candidate both
+    // return before reaching this point.
+
+    const parsedFR = forceRelinkBodySchema.safeParse(req.body);
+    if (!parsedFR.success) {
+      return res.status(400).json({
+        error:   "Invalid input",
+        details: parsedFR.error.flatten(),
+      });
+    }
+
+    // Load the queue item — confirm it exists, is the right type, and is pending.
+    const frEvent = await db.domainEvent.findUnique({
+      where:  { id },
+      select: { id: true, eventType: true, processedAt: true, payload: true, aggregateId: true },
+    });
+
+    if (!frEvent || frEvent.eventType !== "sensor.identity.review_queued") {
+      return res.status(404).json({ error: "Queue item not found" });
+    }
+
+    if (frEvent.processedAt !== null) {
+      return res.status(409).json({ error: "Queue item has already been processed" });
+    }
+
+    const frPayload = toQueuePayload(frEvent.payload);
+    if (frPayload === null) {
+      logger.error({ eventId: id }, "sensor-identity-queue: queue item has malformed payload");
+      return res.status(500).json({ error: "Queue item has malformed payload" });
+    }
+
+    // This resolution only applies to hold_for_mac_conflict items.
+    // register_new uses "provision"; needs_manual_review uses "select_candidate".
+    if (frPayload.action !== "hold_for_mac_conflict") {
+      return res.status(409).json({
+        error:        "resolution 'force_relink' only applies to hold_for_mac_conflict queue items",
+        actualAction: frPayload.action,
+      });
+    }
+
+    // Pipeline invariants: hold_for_mac_conflict guarantees both fields are
+    // non-null — crossTierConflict requires a non-null observedMac, and the
+    // action only fires after a single higher-tier record matched. Surface 500
+    // rather than silently proceeding if either is missing; the payload is corrupt.
+    const matchedRecordId = frPayload.reconciliation.matchedRecordId;
+    const contestedMac    = frPayload.reconciliation.observedMac;
+
+    if (matchedRecordId === null || contestedMac === null) {
+      logger.error(
+        { eventId: id, matchedRecordId, contestedMac },
+        "sensor-identity-queue: hold_for_mac_conflict item is missing required reconciliation fields",
+      );
+      return res.status(500).json({ error: "Queue item is missing required reconciliation fields" });
+    }
+
+    // Preserve existing payload for the transaction's spread-and-append step.
+    const frExistingPayload: Record<string, unknown> =
+      frEvent.payload !== null &&
+      typeof frEvent.payload === "object" &&
+      !Array.isArray(frEvent.payload)
+        ? (frEvent.payload as Record<string, unknown>)
+        : {};
+
+    try {
+      const { targetRegistryId, revokedFromRegistryId } = await persistForceRelink({
+        matchedRegistryId:    matchedRecordId,
+        contestedMac,
+        previousMacOnA:       frPayload.reconciliation.previousMac,
+        deviceIdentifier:     frPayload.observation.deviceIdentifier,
+        actorId:              req.user!.id,
+        queueItemId:          id,
+        hubId:                frEvent.aggregateId,
+        existingQueuePayload: frExistingPayload,
+      });
+
+      logger.info(
+        {
+          eventId:               id,
+          targetRegistryId,
+          revokedFromRegistryId,
+          contestedMac,
+          actorId:               req.user!.id,
+        },
+        "sensor-identity-queue: hold_for_mac_conflict resolved via force_relink",
+      );
+
+      return res.status(200).json({
+        ok:                    true,
+        resolution:            "force_relink",
+        targetRegistryId,
+        revokedFromRegistryId,
+        processedAt:           new Date().toISOString(),
+      });
+
+    } catch (err) {
+      if (err instanceof RetiredRecordError) {
+        return res.status(409).json({
+          error:      err.message,
+          registryId: err.registryId,
+        });
+      }
+      logger.error(
+        { err: (err as Error).message, stack: (err as Error).stack, eventId: id },
+        "sensor-identity-queue: unexpected error during force_relink resolve",
       );
       return res.status(500).json({ error: "Internal server error" });
     }

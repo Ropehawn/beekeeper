@@ -172,6 +172,28 @@ export class AssetIdConflictError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// RetiredRecordError
+//
+// Thrown by persistForceRelink() when the matched registry record A is found
+// to be retired (or missing) at the time the operator resolves the queue item.
+// A retired record should not receive a MAC assignment. The calling route
+// returns HTTP 409 so the operator can investigate the record's state.
+// ---------------------------------------------------------------------------
+
+export class RetiredRecordError extends Error {
+  readonly registryId: string;
+
+  constructor(registryId: string) {
+    super(
+      `Registry record ${registryId} has been retired or no longer exists ` +
+      `and cannot receive a MAC assignment.`,
+    );
+    this.name       = "RetiredRecordError";
+    this.registryId = registryId;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ProvisionNewInput
 //
 // Parameter bag for persistProvisionNew(). Kept as an interface rather than
@@ -481,6 +503,200 @@ export async function persistSelectCandidate(input: SelectCandidateInput): Promi
     },
     "sensor-registry: ambiguous candidate selected from review queue",
   );
+}
+
+// ---------------------------------------------------------------------------
+// ForceRelinkInput
+//
+// Parameter bag for persistForceRelink(). All fields are derived from the
+// stored queue item payload — the operator supplies no extra data beyond the
+// resolution type itself.
+// ---------------------------------------------------------------------------
+
+export interface ForceRelinkInput {
+  // The registry record the pipeline matched via assetId or deviceIdentifier
+  // at observation time (record A). This is reconciliation.matchedRecordId.
+  matchedRegistryId:    string;
+  // The normalized MAC to transfer to record A. This is reconciliation.observedMac
+  // (already uppercase/trimmed by normalizeObservation before storage).
+  contestedMac:         string;
+  // Record A's MAC at observation time. Written into A's audit event so the
+  // trail shows what was there before the force-relink. May be null if A had
+  // no MAC when the observation arrived.
+  previousMacOnA:       string | null;
+  // Sync deviceIdentifier on A if the observation reported one (may be null).
+  deviceIdentifier:     string | null;
+  // Actor who resolved the item
+  actorId:              string;
+  // The domain_events row being resolved
+  queueItemId:          string;
+  // Hub that reported the original observation
+  hubId:                string;
+  // Existing queue item payload — spread before appending resolution fields
+  existingQueuePayload: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// persistForceRelink
+//
+// Called when an operator resolves a 'hold_for_mac_conflict' queue item by
+// asserting that the contested MAC belongs to the matched record (record A),
+// revoking it from whichever record currently holds it (record B, if any).
+//
+// Runs entirely inside a single Prisma transaction:
+//
+//   1. Load record A — throws RetiredRecordError if missing or retired
+//   2. Find the current owner of contestedMac excluding A (record B, nullable)
+//   3. If B found: set B.currentMacAddress = null
+//   4. Update A: set currentMacAddress = contestedMac (+ optional deviceIdentifier)
+//   5. If B found: provisioning_events INSERT for B — eventType: 'mac_updated',
+//      newMac: null, payload records the revocation context
+//   6. provisioning_events INSERT for A — eventType: 'mac_updated', records
+//      the assignment and the record it was revoked from
+//   7. domain_events UPDATE — processedAt = NOW(), appends resolution metadata
+//
+// Steps 3 and 4 together satisfy the UNIQUE constraint: B's MAC is nulled in
+// the same transaction that writes it to A. PostgreSQL checks constraints at
+// transaction commit, so order between 3 and 4 within the transaction does not
+// matter for correctness — but B is cleared first for readability.
+//
+// If the contested MAC is no longer owned by any record at resolution time
+// (B cannot be found), steps 3 and 5 are skipped. The MAC is written to A
+// unconditionally — the conflict has naturally resolved itself.
+//
+// Returns:
+//   { targetRegistryId, revokedFromRegistryId }
+//   revokedFromRegistryId is null when the MAC was already unowned at resolve time.
+//
+// Throws:
+//   RetiredRecordError  — record A is retired or missing (HTTP 409)
+//   Any Prisma error    — unexpected (HTTP 500)
+// ---------------------------------------------------------------------------
+
+export async function persistForceRelink(
+  input: ForceRelinkInput,
+): Promise<{ targetRegistryId: string; revokedFromRegistryId: string | null }> {
+  const now = new Date();
+
+  // Captured inside the transaction so the return value is available after commit.
+  // Declared with let so the transaction callback can assign it.
+  // eslint-disable-next-line prefer-const
+  let revokedFromRegistryId: string | null = null;
+
+  await db.$transaction(async (tx: any) => {
+    // ── 1. Verify record A exists and is not retired ────────────────────────
+    const recordA = await tx.sensorRegistry.findUnique({
+      where:  { id: input.matchedRegistryId },
+      select: { id: true, lifecycleStatus: true },
+    });
+    if (recordA === null || recordA.lifecycleStatus === "retired") {
+      throw new RetiredRecordError(input.matchedRegistryId);
+    }
+
+    // ── 2. Find the current owner of the contested MAC, excluding A ─────────
+    // Record B may differ from whoever held the MAC at observation time — the
+    // registry can change between queuing and resolution. We act on the current
+    // state rather than the snapshot so we don't revoke from the wrong record.
+    const recordB = await tx.sensorRegistry.findFirst({
+      where: {
+        currentMacAddress: input.contestedMac,
+        id:                { not: input.matchedRegistryId },
+      },
+      select: { id: true },
+    });
+    revokedFromRegistryId = recordB?.id ?? null;
+
+    // ── 3. Revoke MAC from B (if B still holds it) ──────────────────────────
+    if (recordB !== null) {
+      await tx.sensorRegistry.update({
+        where: { id: recordB.id },
+        data:  { currentMacAddress: null },
+      });
+    }
+
+    // ── 4. Assign MAC to A (+ optional deviceIdentifier sync) ───────────────
+    await tx.sensorRegistry.update({
+      where: { id: input.matchedRegistryId },
+      data: {
+        currentMacAddress: input.contestedMac,
+        ...(input.deviceIdentifier !== null && {
+          deviceIdentifier: input.deviceIdentifier,
+        }),
+      },
+    });
+
+    // ── 5. Audit: MAC revocation on B ────────────────────────────────────────
+    if (recordB !== null) {
+      await tx.provisioningEvent.create({
+        data: {
+          id:         crypto.randomUUID(),
+          registryId: recordB.id,
+          eventType:  "mac_updated",
+          actorId:    input.actorId,
+          occurredAt: now,
+          payload: {
+            source:                 "review_queue_force_relink_revocation",
+            queueItemId:            input.queueItemId,
+            hubId:                  input.hubId,
+            previousMac:            input.contestedMac,
+            newMac:                 null,
+            revokedByForceRelinkOf: input.matchedRegistryId,
+          },
+        },
+      });
+    }
+
+    // ── 6. Audit: MAC assignment on A ────────────────────────────────────────
+    await tx.provisioningEvent.create({
+      data: {
+        id:         crypto.randomUUID(),
+        registryId: input.matchedRegistryId,
+        eventType:  "mac_updated",
+        actorId:    input.actorId,
+        occurredAt: now,
+        payload: {
+          source:           "review_queue_resolve",
+          queueItemId:      input.queueItemId,
+          hubId:            input.hubId,
+          previousMac:      input.previousMacOnA,
+          newMac:           input.contestedMac,
+          revokedFrom:      revokedFromRegistryId,
+          deviceIdentifier: input.deviceIdentifier,
+        },
+      },
+    });
+
+    // ── 7. Seal the queue item ───────────────────────────────────────────────
+    await tx.domainEvent.update({
+      where: { id: input.queueItemId },
+      data: {
+        processedAt: now,
+        payload: {
+          ...input.existingQueuePayload,
+          resolvedBy:            input.actorId,
+          resolvedAt:            now.toISOString(),
+          resolution:            "force_relink",
+          targetRegistryId:      input.matchedRegistryId,
+          revokedFromRegistryId: revokedFromRegistryId,
+        },
+      },
+    });
+  });
+
+  logger.info(
+    {
+      targetRegistryId:      input.matchedRegistryId,
+      contestedMac:          input.contestedMac,
+      revokedFromRegistryId,
+      queueItemId:           input.queueItemId,
+    },
+    "sensor-registry: MAC force-relinked from review queue",
+  );
+
+  return {
+    targetRegistryId:      input.matchedRegistryId,
+    revokedFromRegistryId,
+  };
 }
 
 // ---------------------------------------------------------------------------
