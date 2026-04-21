@@ -1628,13 +1628,41 @@
         <input type="hidden" id="node-register-mac">
         <input type="hidden" id="node-register-vendor">
         <div style="display:flex;flex-direction:column;gap:12px;">
+
+          <!-- ID row: input + Generate button + QR preview -->
           <div class="form-field">
             <label class="form-label">Sensor ID / QR Code <span style="color:#ef4444;">*</span></label>
-            <input class="form-input" id="node-register-device-id" type="text"
-              placeholder="e.g. T7K2M or C6-001" style="font-family:monospace;font-size:12px;">
-            <div style="font-size:11px;color:#64748b;margin-top:3px;">
-              Enter the ID printed on the device label, or assign a new one.</div>
+            <div style="display:flex;gap:8px;align-items:flex-start;">
+              <div style="flex:1;">
+                <input class="form-input" id="node-register-device-id" type="text"
+                  placeholder="e.g. T7K2M" oninput="onRegisterIdInput()"
+                  style="font-family:monospace;font-size:13px;letter-spacing:1px;text-transform:uppercase;">
+                <div style="font-size:11px;color:#64748b;margin-top:3px;">
+                  Type an existing label ID, or generate a new one below.</div>
+              </div>
+              <!-- QR preview panel -->
+              <div id="node-register-qr-panel"
+                style="display:none;flex-direction:column;align-items:center;gap:4px;flex-shrink:0;">
+                <img id="node-register-qr-img" src="" alt="QR"
+                  style="width:90px;height:90px;border:1px solid #334155;border-radius:4px;background:#fff;">
+                <span style="font-size:10px;font-family:monospace;color:#94a3b8;"
+                  id="node-register-qr-label"></span>
+              </div>
+            </div>
           </div>
+
+          <!-- Generate + Print actions -->
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-secondary" id="node-register-gen-btn"
+              onclick="generateRegisterId()" style="font-size:12px;">
+              ⚙ Generate ID
+            </button>
+            <button class="btn btn-secondary" id="node-register-print-btn"
+              onclick="printRegisterLabel()" style="font-size:12px;display:none;">
+              🖨 Print Label
+            </button>
+          </div>
+
           <div class="form-field">
             <label class="form-label">Friendly Name <span style="color:#ef4444;">*</span></label>
             <input class="form-input" id="node-register-name" type="text"
@@ -1669,7 +1697,7 @@
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="closeNodeRegisterModal()">Cancel</button>
-          <button class="btn btn-primary" onclick="saveNodeRegister()">Register</button>
+          <button class="btn btn-primary" onclick="saveNodeRegister()">Register &amp; Save</button>
         </div>
       </div>
     </div>
@@ -8449,6 +8477,68 @@
   function closeNodeEditModal()     { document.getElementById('node-edit-overlay').style.display = 'none'; }
   function closeNodeRegisterModal() { document.getElementById('node-register-overlay').style.display = 'none'; }
 
+  function onRegisterIdInput() {
+    const id       = document.getElementById('node-register-device-id').value.trim().toUpperCase();
+    const panel    = document.getElementById('node-register-qr-panel');
+    const img      = document.getElementById('node-register-qr-img');
+    const lbl      = document.getElementById('node-register-qr-label');
+    const printBtn = document.getElementById('node-register-print-btn');
+    // Force uppercase in the field
+    document.getElementById('node-register-device-id').value = id;
+    if (id.length >= 3) {
+      img.src   = 'https://api.qrserver.com/v1/create-qr-code/?size=90x90&data=' + encodeURIComponent(id);
+      lbl.textContent         = id;
+      panel.style.display     = 'flex';
+      printBtn.style.display  = '';
+    } else {
+      panel.style.display    = 'none';
+      printBtn.style.display = 'none';
+    }
+  }
+
+  async function generateRegisterId() {
+    const btn = document.getElementById('node-register-gen-btn');
+    btn.disabled = true;
+    try {
+      const token = localStorage.getItem('beekeeper_token');
+      const res = await fetch('/api/v1/sensors/devices/generate-id', {
+        headers: { 'Authorization': 'Bearer ' + token }
+      });
+      if (!res.ok) throw new Error('Failed to generate ID');
+      const { deviceId } = await res.json();
+      document.getElementById('node-register-device-id').value = deviceId;
+      onRegisterIdInput();
+    } catch (e) {
+      showToast('⚠️ ' + (e.message || 'Could not generate ID'));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function printRegisterLabel() {
+    const id   = document.getElementById('node-register-device-id').value.trim().toUpperCase();
+    const name = document.getElementById('node-register-name').value.trim();
+    if (!id) { showToast('⚠️ Enter a Sensor ID first'); return; }
+    const win = window.open('', '_blank', 'width=320,height=420');
+    if (!win) { showToast('⚠️ Pop-up blocked — allow pop-ups and try again'); return; }
+    win.document.write('<!DOCTYPE html><html><head><title>Label: ' + id + '</title>'
+      + '<style>'
+      + 'body{font-family:monospace;text-align:center;padding:20px;margin:0;}'
+      + '.label{display:inline-block;border:2px solid #000;padding:16px 20px;border-radius:4px;}'
+      + 'img{display:block;margin:0 auto 8px;}'
+      + '.id{font-size:22px;font-weight:bold;letter-spacing:3px;}'
+      + '.name{font-size:11px;color:#555;margin-top:6px;max-width:160px;word-wrap:break-word;}'
+      + '</style></head>'
+      + '<body><div class="label">'
+      + '<img src="https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=' + encodeURIComponent(id) + '" width="160" height="160">'
+      + '<div class="id">' + id + '</div>'
+      + (name ? '<div class="name">' + name + '</div>' : '')
+      + '</div>'
+      + '<script>window.onload=function(){window.print();};<\/script>'
+      + '</body></html>');
+    win.document.close();
+  }
+
   function openNodeRegisterModal(btn) {
     const mac    = btn.dataset.mac;
     const vendor = btn.dataset.vendor || 'generic';
@@ -8461,7 +8551,9 @@
     document.getElementById('node-register-location-note').value    = '';
     document.getElementById('node-register-title').textContent      = 'Register Sensor';
     document.getElementById('node-register-sub').textContent        = mac + ' · ' + vendor;
-    document.getElementById('node-register-overlay').style.display  = 'flex';
+    document.getElementById('node-register-qr-panel').style.display   = 'none';
+    document.getElementById('node-register-print-btn').style.display  = 'none';
+    document.getElementById('node-register-overlay').style.display    = 'flex';
     setTimeout(() => document.getElementById('node-register-device-id').focus(), 50);
   }
 

@@ -253,6 +253,31 @@ router.post("/devices", requireAuth, async (req: AuthRequest, res) => {
   res.status(201).json(created);
 });
 
+// ── GET /api/v1/sensors/devices/generate-id ──────────────────────────────────
+// Returns a unique 5-char alphanumeric device ID not currently in use.
+// Avoids visually ambiguous characters (I, O, 0, 1).
+// Called by the Register modal's "Generate ID" button.
+//
+// Returns: { deviceId: string }
+
+const ID_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 chars, no I/O/0/1
+
+router.get("/devices/generate-id", requireAuth, async (req: AuthRequest, res) => {
+  if (req.user?.role === "spectator") {
+    return res.status(403).json({ error: "Insufficient permissions" });
+  }
+
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const id = Array.from({ length: 5 }, () =>
+      ID_CHARS[Math.floor(Math.random() * ID_CHARS.length)]
+    ).join('');
+    const conflict = await db.sensorDevice.findUnique({ where: { deviceId: id }, select: { id: true } });
+    if (!conflict) return res.json({ deviceId: id });
+  }
+
+  return res.status(500).json({ error: "Could not generate a unique ID — try again" });
+});
+
 // ── POST /api/v1/sensors/devices/register ────────────────────────────────────
 // Admin path to register any MAC-based sensor device from the browser UI.
 // Mirrors the hub-key-authenticated /hubs/devices/provision endpoint but
