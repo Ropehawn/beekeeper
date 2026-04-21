@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
 BeeKeeper BLE Ingestion Daemon
-Continuously scans for Fanstel SC833F sensors, batches readings,
-and uploads to the BeeKeeper API every upload cycle.
+Continuously scans for BLE sensors, batches readings, and uploads to the
+BeeKeeper API every upload cycle.
+
+Supported sensors:
+  - Fanstel SC833F  (iBeacon, company ID 0x0634)
+  - BeeKeeper C6    (custom v0x02–v0x04, company ID 0xFFFF + "BK" signature)
 
 Runs as a systemd service on the Tachyon hub.
 """
@@ -19,7 +23,13 @@ from pathlib import Path
 
 CONFIG_PATH = Path.home() / "beekeeper-ai" / "hub-config.json"
 DEVICE_CACHE_PATH = Path.home() / "beekeeper-ai" / "device_cache.json"
+
+# Fanstel SC833F
 FANSTEL_COMPANY_ID = 0x0634
+
+# BeeKeeper C6 — company ID 0xFFFF (R&D) + "BK" signature
+BEEKEEPER_COMPANY_ID = 0xFFFF
+BEEKEEPER_SIG = b"BK"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +37,90 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S",
 )
 log = logging.getLogger("ble-daemon")
+
+
+def parse_bk_c6_payload(data: bytes) -> dict | None:
+    """
+    Parse a BeeKeeper C6 manufacturer-specific data payload.
+
+    bleak strips the 2-byte company ID before delivering to the callback, so
+    `data` here starts at the "BK" signature (bytes 0-1), not at the company ID.
+
+    Wire layout after company-ID strip (matches ble-scanner.js with off -= 2):
+      [0-1]   "BK" signature
+      [2]     protocol version (0x02 / 0x03 / 0x04)
+      [3]     node type
+      [4-5]   temperature × 100 °C  (int16 LE, 0x7FFF = invalid)
+      [6-7]   humidity × 100 %RH    (uint16 LE, 0xFFFF = invalid)
+      [8-10]  pressure Pa           (uint24 LE, 0xFFFFFF = invalid)
+      [11-14] weight grams / raw HX711 counts (int32 LE, 0x7FFFFFFF = invalid)
+      [15]    battery %             (0xFF = USB/unknown)
+      [16]    flags (b0=BME, b1=HX711, b2=calibrated, b3=first-boot, b4=mic)
+    v0x03+:
+      [17]    audio RMS magnitude   (dB below FS, 0xFF = invalid)
+      [18]    audio peak magnitude  (dB below FS, 0xFF = invalid)
+    v0x04+:
+      [19]    FFT band low     100–200 Hz  (0xFF = invalid)
+      [20]    FFT band mid-low 200–400 Hz  (queen piping fundamental)
+      [21]    FFT band mid-high 400–800 Hz
+      [22]    FFT band high    800–2000 Hz
+      [23]    reserved
+
+    Returns a dict of metric → value, or None if payload is too short / invalid.
+    """
+    if len(data) < 17:
+        return None
+    if data[0:2] != BEEKEEPER_SIG:
+        return None
+
+    proto_ver = data[2]
+    flags     = data[16]
+
+    bme_present    = bool(flags & 0x01)
+    hx_present     = bool(flags & 0x02)
+    hx_calibrated  = bool(flags & 0x04)
+    mic_present    = bool(flags & 0x10)
+
+    readings = {}
+
+    if bme_present:
+        temp_raw  = struct.unpack_from("<h", data, 4)[0]   # int16 LE
+        hum_raw   = struct.unpack_from("<H", data, 6)[0]   # uint16 LE
+        press_raw = data[8] | (data[9] << 8) | (data[10] << 16)
+
+        if temp_raw  != 0x7FFF:   readings["temperature_c"] = temp_raw  / 100.0
+        if hum_raw   != 0xFFFF:   readings["humidity_pct"]  = hum_raw   / 100.0
+        if press_raw != 0xFFFFFF: readings["pressure_pa"]   = float(press_raw)
+
+    if hx_present:
+        weight_raw = struct.unpack_from("<i", data, 11)[0]  # int32 LE
+        if weight_raw != 0x7FFFFFFF:
+            key = "weight_g" if hx_calibrated else "hx711_raw_counts"
+            readings[key] = float(weight_raw)
+
+    battery = data[15]
+    if battery != 0xFF:
+        readings["battery_pct"] = float(battery)
+
+    if mic_present and proto_ver >= 0x03 and len(data) >= 19:
+        rms_mag  = data[17]
+        peak_mag = data[18]
+        if rms_mag  != 0xFF: readings["audio_rms_dbfs"]  = float(-rms_mag)
+        if peak_mag != 0xFF: readings["audio_peak_dbfs"] = float(-peak_mag)
+
+        if proto_ver >= 0x04 and len(data) >= 23:
+            bands = {
+                "audio_band_low_dbfs":     data[19],
+                "audio_band_midlow_dbfs":  data[20],
+                "audio_band_midhigh_dbfs": data[21],
+                "audio_band_high_dbfs":    data[22],
+            }
+            for metric, mag in bands.items():
+                if mag != 0xFF:
+                    readings[metric] = float(-mag)
+
+    return readings if readings else None
+
 
 class BLEIngestionDaemon:
     def __init__(self):
@@ -44,34 +138,52 @@ class BLEIngestionDaemon:
         self.refresh_device_cache()
 
     def scan_ble(self, timeout=10):
-        """Synchronous BLE scan using bleak."""
+        """Synchronous BLE scan using bleak. Returns dict of mac → sensor dict."""
         from bleak import BleakScanner
 
         found = {}
 
         def callback(device, adv_data):
             for cid, data in adv_data.manufacturer_data.items():
-                if cid == FANSTEL_COMPANY_ID and len(data) >= 21 and data[0] == 0x02 and data[1] == 0x15:
-                    major = struct.unpack('>H', data[18:20])[0]
-                    minor = struct.unpack('>H', data[20:22])[0]
+
+                # ── Fanstel SC833F (iBeacon) ───────────────────────────────
+                if (cid == FANSTEL_COMPANY_ID and len(data) >= 21
+                        and data[0] == 0x02 and data[1] == 0x15):
+                    major = struct.unpack(">H", data[18:20])[0]
+                    minor = struct.unpack(">H", data[20:22])[0]
                     key = device.address
                     if key not in found or adv_data.rssi > found[key]["rssi"]:
                         found[key] = {
-                            "mac": device.address,
-                            "rssi": adv_data.rssi,
-                            "temp_c": major,
-                            "humidity_pct": minor,
+                            "mac":          device.address,
+                            "rssi":         adv_data.rssi,
+                            "sensor_type":  "sc833f",
+                            "temperature_c": float(major),
+                            "humidity_pct":  float(minor),
                         }
 
-        async def _scan():
-            scanner = BleakScanner(detection_callback=callback)
-            await scanner.start()
-            await asyncio.sleep(timeout)
-            await scanner.stop()
+                # ── BeeKeeper C6 (custom BK payload) ──────────────────────
+                elif (cid == BEEKEEPER_COMPANY_ID and len(data) >= 2
+                      and data[0:2] == BEEKEEPER_SIG):
+                    metrics = parse_bk_c6_payload(data)
+                    if metrics is None:
+                        continue
+                    key = device.address
+                    if key not in found or adv_data.rssi > found[key]["rssi"]:
+                        found[key] = {
+                            "mac":         device.address,
+                            "rssi":        adv_data.rssi,
+                            "sensor_type": "beekeeper_c6",
+                            **metrics,
+                        }
 
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(_scan())
-        loop.close()
+        # asyncio.run() creates and manages a fresh event loop each call,
+        # avoiding the DBus connection state corruption that occurs when the
+        # same loop is closed and a new one is opened in the same process.
+        async def _scan():
+            async with BleakScanner(detection_callback=callback):
+                await asyncio.sleep(timeout)
+
+        asyncio.run(_scan())
         return found
 
     def refresh_device_cache(self):
@@ -82,13 +194,11 @@ class BLEIngestionDaemon:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
                 self.mac_to_device_id = {k.upper(): v for k, v in data.get("macMap", {}).items()}
-                # Persist to local cache for offline resilience
                 DEVICE_CACHE_PATH.write_text(json.dumps(self.mac_to_device_id, indent=2))
                 self.last_cache_refresh = time.time()
                 log.info(f"Device cache refreshed: {len(self.mac_to_device_id)} mappings")
         except Exception as e:
             log.warning(f"Failed to refresh device cache from API: {e}")
-            # Fall back to local cache
             if DEVICE_CACHE_PATH.exists():
                 self.mac_to_device_id = json.loads(DEVICE_CACHE_PATH.read_text())
                 log.info(f"Using local device cache: {len(self.mac_to_device_id)} mappings")
@@ -97,25 +207,47 @@ class BLEIngestionDaemon:
         """Convert scan results to API-ready readings and buffer them."""
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Refresh device cache periodically
         if time.time() - self.last_cache_refresh > self.cache_refresh_interval:
             self.refresh_device_cache()
 
         for mac, s in sensors.items():
             mac_upper = s["mac"].upper()
             device_id = self.mac_to_device_id.get(mac_upper)
+            sensor_type = s["sensor_type"]
+            vendor = (
+                "tachyon_ble_sc833f"     if sensor_type == "sc833f"
+                else "tachyon_ble_beekeeper_c6"
+            )
 
             base = {
-                "deviceMac": s["mac"],
-                "vendor": "tachyon_ble_sc833f",
+                "deviceMac":  s["mac"],
+                "vendor":     vendor,
                 "signalRssi": s["rssi"],
                 "recordedAt": now,
             }
             if device_id:
                 base["deviceId"] = device_id
 
-            self.readings_buffer.append({**base, "metric": "temperature_c", "value": s["temp_c"], "unit": "°C"})
-            self.readings_buffer.append({**base, "metric": "humidity_pct", "value": s["humidity_pct"], "unit": "%"})
+            # Emit one reading row per metric (matching Node.js hub pattern)
+            METRIC_UNITS = {
+                "temperature_c":          "°C",
+                "humidity_pct":           "%",
+                "pressure_pa":            "Pa",
+                "weight_g":               "g",
+                "hx711_raw_counts":       "counts",
+                "battery_pct":            "%",
+                "audio_rms_dbfs":         "dBFS",
+                "audio_peak_dbfs":        "dBFS",
+                "audio_band_low_dbfs":    "dBFS",
+                "audio_band_midlow_dbfs": "dBFS",
+                "audio_band_midhigh_dbfs":"dBFS",
+                "audio_band_high_dbfs":   "dBFS",
+            }
+            for metric, unit in METRIC_UNITS.items():
+                if metric in s:
+                    self.readings_buffer.append(
+                        {**base, "metric": metric, "value": s[metric], "unit": unit}
+                    )
 
     def upload_readings(self):
         """Upload buffered readings to the BeeKeeper API."""
@@ -153,22 +285,28 @@ class BLEIngestionDaemon:
 
         while True:
             try:
-                # Scan
                 sensors = self.scan_ble(timeout=10)
+
                 if sensors:
-                    log.info(f"Scan: {len(sensors)} sensors — " +
-                             ", ".join(f"{s['mac'][-5:]} {s['temp_c']}°C/{s['humidity_pct']}%" for s in sensors.values()))
+                    sc833f_count = sum(1 for s in sensors.values() if s["sensor_type"] == "sc833f")
+                    c6_count     = sum(1 for s in sensors.values() if s["sensor_type"] == "beekeeper_c6")
+                    log.info(
+                        f"Scan: {len(sensors)} sensors "
+                        f"(SC833F={sc833f_count}, C6={c6_count}) — "
+                        + ", ".join(
+                            f"{s['mac'][-5:]}={s.get('temperature_c','?')}°C"
+                            for s in sensors.values()
+                        )
+                    )
                     self.buffer_readings(sensors)
                 else:
-                    log.warning("Scan: no Fanstel sensors found")
+                    log.warning("Scan: no sensors found")
 
-                # Upload if interval elapsed
                 if time.time() - self.last_upload >= self.upload_interval:
                     self.upload_readings()
 
             except KeyboardInterrupt:
                 log.info("Shutting down...")
-                # Final upload
                 if self.readings_buffer:
                     log.info(f"Final upload of {len(self.readings_buffer)} buffered readings")
                     self.upload_readings()
