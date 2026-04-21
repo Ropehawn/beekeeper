@@ -23,4 +23,4 @@ npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma
 echo "Migrations complete."
 
 echo "Starting API server..."
-exec node apps/api/dist/server.js
+exec node apps/api/dist/apps/api/src/server.js

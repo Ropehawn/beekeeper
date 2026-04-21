@@ -303,7 +303,7 @@ router.post(
   requireAuth,
   requireRole("queen", "worker"),
   async (req: AuthRequest, res) => {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     if (!UUID_RE.test(id)) {
       return res.status(400).json({ error: "Invalid id format" });
@@ -453,7 +453,7 @@ router.post(
   requireAuth,
   requireRole("queen", "worker"),
   async (req: AuthRequest, res) => {
-    const { id } = req.params;
+    const id = req.params.id as string;
 
     if (!UUID_RE.test(id)) {
       return res.status(400).json({ error: "Invalid id format" });

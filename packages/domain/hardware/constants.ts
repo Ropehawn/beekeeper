@@ -72,4 +72,4 @@ export const ASSET_ID_PREFIXES: Record<AssetType, AssetIdPrefix> = {
 
 // Validates a formatted BeeKeeper asset ID, e.g. BK-SEN-000241.
 // Pattern: BK - <3-letter prefix> - <6-digit sequence>
-export const ASSET_ID_REGEX = /^BK-(SEN|CAM|WGT|HUB|AUD|ENV)-\d{6}$/ as const;
+export const ASSET_ID_REGEX = /^BK-(SEN|CAM|WGT|HUB|AUD|ENV)-\d{6}$/;

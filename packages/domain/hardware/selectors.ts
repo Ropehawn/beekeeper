@@ -252,7 +252,7 @@ export function hiveHasRole(
 
 export function hiveMissingRoles(
   obs: HiveObservability,
-  requiredRoles: DeviceRole[],
+  requiredRoles: readonly DeviceRole[],
 ): DeviceRole[] {
   return requiredRoles.filter((role) => !hiveHasRole(obs, role));
 }
