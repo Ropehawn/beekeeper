@@ -75,6 +75,22 @@ class BLEScanner {
     }
 
     const manu = peripheral.advertisement?.manufacturerData;
+
+    // BeeKeeper C6 auto-discover: identify C6 nodes by BK signature even when
+    // the MAC is not yet registered in the device registry.  Creates a transient
+    // device entry so readings flow while the operator registers the node.
+    // Triggers only on the exact 4-byte pattern: company ID 0xFFFF + "BK".
+    if (!dev && manu && manu.length >= 4) {
+      const hasBKFull = manu[0] === 0xFF && manu[1] === 0xFF &&
+                        manu[2] === BLEScanner.BEEKEEPER_SIG_0 &&
+                        manu[3] === BLEScanner.BEEKEEPER_SIG_1;
+      const hasBKDirect = manu[0] === BLEScanner.BEEKEEPER_SIG_0 &&
+                          manu[1] === BLEScanner.BEEKEEPER_SIG_1;
+      if (hasBKFull || hasBKDirect) {
+        dev = { mac, type: "beekeeper_c6", hiveId: undefined };
+        this.logger.info({ msg: "ble.bkc6.auto_discovered", mac });
+      }
+    }
     const rssi = peripheral.rssi;
     const now = new Date().toISOString();
 
