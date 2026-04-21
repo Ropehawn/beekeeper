@@ -13,6 +13,9 @@ export interface NodeHealthItem {
   lastSeenAt:       string;
   ageSec:           number;
   status:           'green' | 'yellow' | 'red';
+  // Device identity (null when no sensor_devices row matched this MAC)
+  sensorDeviceId:   string | null;
+  sensorQrId:       string | null;
   // Hive context
   hiveId:           string | null;
   hiveName:         string | null;

@@ -15,6 +15,10 @@ function fmt(value: number | null, decimals: number, unit: string): string | nul
   return `${value.toFixed(decimals)}\u202f${unit}`;
 }
 
+function escAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 // ── Card renderer ─────────────────────────────────────────────────────────────
 
 const STATUS_COLOR: Record<string, string> = {
@@ -93,17 +97,38 @@ function renderCard(item: NodeHealthItem): string {
   const rssiStr = item.signalRssi != null ? `${item.signalRssi}\u202fdBm` : '—';
   const hasBody = rows.length > 0 || badges.length > 0;
 
+  // ── Edit button (only when a sensor_devices row is linked) ──────────────
+  const editBtn = item.sensorDeviceId
+    ? `<button onclick="openNodeEditModal(this)" ` +
+        `data-device-id="${escAttr(item.sensorDeviceId)}" ` +
+        `data-qr-id="${escAttr(item.sensorQrId ?? '')}" ` +
+        `data-name="${escAttr(item.deviceLabel ?? '')}" ` +
+        `data-hive-id="${escAttr(item.hiveId ?? '')}" ` +
+        `data-loc-role="${escAttr(item.locationRole ?? '')}" ` +
+        `data-loc-note="${escAttr(item.locationNote ?? '')}" ` +
+        `style="font-size:10px;font-weight:600;color:#64748b;cursor:pointer;flex-shrink:0;` +
+        `padding:1px 6px;border:1px solid #334155;border-radius:3px;background:#0f172a;` +
+        `line-height:16px;">✎ Edit</button>`
+    : '';
+
   return `
     <div style="background:#1e293b;border:1px solid ${color};border-radius:8px;` +
       `padding:12px 16px;margin-bottom:10px;">
 
-      <!-- Header: dot · MAC · status label -->
+      <!-- Header: dot · MAC · status · edit -->
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
         ${dot(color)}
         <span style="font-weight:600;font-size:13px;color:#f1f5f9;font-family:monospace;` +
           `flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.deviceMac}</span>
         <span style="font-size:11px;font-weight:600;color:${color};flex-shrink:0;">${label}</span>
+        ${editBtn}
       </div>
+
+      <!-- QR / sensor ID -->
+      ${item.sensorQrId
+        ? `<div style="font-size:10px;color:#475569;font-family:monospace;` +
+            `margin-bottom:4px;padding-left:16px;">ID: ${escAttr(item.sensorQrId)}</div>`
+        : ''}
 
       <!-- Hive context line -->
       <div style="font-size:12px;color:${contextColor};margin-bottom:${item.locationNote ? '2px' : '6px'};` +

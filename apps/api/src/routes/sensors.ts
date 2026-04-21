@@ -253,6 +253,55 @@ router.post("/devices", requireAuth, async (req: AuthRequest, res) => {
   res.status(201).json(created);
 });
 
+// ── PATCH /api/v1/sensors/devices/:id ────────────────────────────────────────
+// Partial update of any sensor device — works for all vendors (unifi_protect,
+// tachyon, etc.). Only supplied fields are updated; omitted fields are unchanged.
+// Used by the Node Health "Edit" modal to set name, hive, and location fields.
+//
+// Returns: the updated SensorDevice row.
+
+const patchDeviceSchema = z.object({
+  name:         z.string().min(1).max(255).optional(),
+  hiveId:       z.string().uuid().nullable().optional(),
+  locationRole: z.enum(LOCATION_ROLE_VALUES).nullable().optional(),
+  locationNote: z.string().max(500).nullable().optional(),
+});
+
+router.patch("/devices/:id", requireAuth, async (req: AuthRequest, res) => {
+  if (req.user?.role === "spectator") {
+    return res.status(403).json({ error: "Insufficient permissions" });
+  }
+
+  const id = String(req.params.id);
+  if (!UUID_RE.test(id)) {
+    return res.status(400).json({ error: "Invalid device ID" });
+  }
+
+  const body = patchDeviceSchema.safeParse(req.body);
+  if (!body.success) {
+    return res.status(400).json({ error: "Invalid input", details: body.error.flatten() });
+  }
+
+  const device = await db.sensorDevice.findUnique({ where: { id }, select: { id: true } });
+  if (!device) return res.status(404).json({ error: "Device not found" });
+
+  if (body.data.hiveId) {
+    const hive = await db.hive.findUnique({ where: { id: body.data.hiveId }, select: { id: true } });
+    if (!hive) return res.status(404).json({ error: "Hive not found" });
+  }
+
+  // Build update — only include fields explicitly present in the request body
+  const data: Record<string, unknown> = {};
+  if (body.data.name         !== undefined) data.name         = body.data.name;
+  if (body.data.hiveId       !== undefined) data.hiveId       = body.data.hiveId;
+  if (body.data.locationRole !== undefined) data.locationRole = body.data.locationRole;
+  if (body.data.locationNote !== undefined) data.locationNote = body.data.locationNote;
+
+  const updated = await db.sensorDevice.update({ where: { id }, data });
+  logger.info({ deviceId: id, fields: Object.keys(data) }, "Sensor device patched");
+  return res.json(updated);
+});
+
 // ── DELETE /api/v1/sensors/devices/:id ───────────────────────────────────────
 // Soft-deletes a sensor device by setting isActive: false.
 // Does NOT delete the row or any readings — historical data is preserved.

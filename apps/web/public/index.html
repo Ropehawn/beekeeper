@@ -1620,6 +1620,50 @@
       </div>
     </div>
 
+    <!-- ═══════════════════════════════════════ NODE EDIT MODAL ══ -->
+    <div class="modal-overlay" id="node-edit-overlay" style="display:none;">
+      <div class="modal-box">
+        <div class="modal-title" id="node-edit-title">Edit Sensor</div>
+        <div class="modal-sub" id="node-edit-sub">Update name, hive assignment, and location</div>
+        <input type="hidden" id="node-edit-device-id">
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div class="form-field">
+            <label class="form-label">Friendly Name</label>
+            <input class="form-input" id="node-edit-name" type="text" placeholder="e.g. Hive 3 Upper Sensor">
+          </div>
+          <div class="form-field">
+            <label class="form-label">Assign to Hive</label>
+            <select class="form-input" id="node-edit-hive-select"></select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">Location Role</label>
+            <select class="form-input" id="node-edit-location-role">
+              <option value="">— unset —</option>
+              <option value="apiary_ambient">Apiary Ambient</option>
+              <option value="hive_exterior">Hive Exterior</option>
+              <option value="entrance">Entrance</option>
+              <option value="inner_cover">Inner Cover</option>
+              <option value="brood_box_upper">Brood Box Upper</option>
+              <option value="brood_box_lower">Brood Box Lower</option>
+              <option value="honey_super">Honey Super</option>
+              <option value="base_scale">Base Scale</option>
+              <option value="under_hive">Under Hive</option>
+              <option value="audio_probe">Audio Probe</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">Location Note <span style="color:#64748b;font-weight:400;">(optional)</span></label>
+            <input class="form-input" id="node-edit-location-note" type="text" placeholder="e.g. Left side of upper brood box">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeNodeEditModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="saveNodeEdit()">Save</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══════════════════════════════════════ APIARY MANAGEMENT ══ -->
     <div class="page" id="page-apiary">
       <div class="page-header">
@@ -8348,6 +8392,62 @@
 
   function closeDiscoverModal() { document.getElementById('discover-overlay').style.display = 'none'; }
   function closeAssignModal()   { document.getElementById('assign-overlay').style.display = 'none'; }
+  function closeNodeEditModal() { document.getElementById('node-edit-overlay').style.display = 'none'; }
+
+  function openNodeEditModal(btn) {
+    const deviceId = btn.dataset.deviceId;
+    const qrId     = btn.dataset.qrId;
+    document.getElementById('node-edit-device-id').value         = deviceId;
+    document.getElementById('node-edit-name').value               = btn.dataset.name    || '';
+    document.getElementById('node-edit-hive-select').innerHTML    = hiveOptsForAssign();
+    document.getElementById('node-edit-hive-select').value        = btn.dataset.hiveId  || '';
+    document.getElementById('node-edit-location-role').value      = btn.dataset.locRole || '';
+    document.getElementById('node-edit-location-note').value      = btn.dataset.locNote || '';
+    document.getElementById('node-edit-title').textContent        = 'Edit Sensor' + (qrId ? ' · ' + qrId : '');
+    document.getElementById('node-edit-sub').textContent          = btn.closest('[style*="border:1px"]')
+      ?.querySelector('span[style*="monospace"]')?.textContent || 'Update placement and name';
+    document.getElementById('node-edit-overlay').style.display    = 'flex';
+  }
+
+  async function saveNodeEdit() {
+    const deviceId    = document.getElementById('node-edit-device-id').value;
+    const name        = document.getElementById('node-edit-name').value.trim();
+    const hiveId      = document.getElementById('node-edit-hive-select').value || null;
+    const locationRole = document.getElementById('node-edit-location-role').value || null;
+    const locationNote = (document.getElementById('node-edit-location-note').value || '').trim() || null;
+
+    const btn = document.querySelector('#node-edit-overlay .btn-primary');
+    if (btn) btn.disabled = true;
+
+    try {
+      const token = localStorage.getItem('beekeeper_token');
+      const body = {};
+      if (name)         body.name         = name;
+      if (hiveId !== undefined) body.hiveId = hiveId;
+      body.locationRole = locationRole;
+      body.locationNote = locationNote;
+
+      const res = await fetch('/api/v1/sensors/devices/' + deviceId, {
+        method:  'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body:    JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Update failed (' + res.status + ')');
+      }
+      closeNodeEditModal();
+      showToast('✅ Sensor updated');
+      // Immediately refresh node health cards
+      import('/dist/pages/node-health.js')
+        .then(mod => mod.loadNodeHealthPage())
+        .catch(() => {});
+    } catch (e) {
+      showToast('⚠️ ' + (e.message || 'Could not save'));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
 
   // ─── SINGLE SOURCE OF TRUTH — ALL DROPDOWNS & VIEWS ─────────────────────────
 
