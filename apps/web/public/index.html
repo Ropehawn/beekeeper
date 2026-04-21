@@ -617,6 +617,7 @@
       <div class="nav-item" id="nav-users" onclick="nav('admin-users')"><span class="icon">👥</span> Users</div>
       <div class="nav-item" id="nav-sensors-cfg" onclick="nav('admin-sensors')"><span class="icon">📡</span> Sensors</div>
       <div class="nav-item" id="nav-cameras-cfg" onclick="nav('admin-cameras')"><span class="icon">🎥</span> Cameras</div>
+      <div class="nav-item" id="nav-sensor-queue" onclick="nav('sensor-queue')"><span class="icon">🔬</span> ID Queue</div>
     </div>
   </div>
 
@@ -1521,6 +1522,18 @@
       </div>
     </div>
 
+    <!-- ═══════════════════════════════════════ SENSOR IDENTITY QUEUE ══ -->
+    <div class="page" id="page-sensor-queue">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Sensor Identity Queue</div>
+          <div class="page-subtitle">Review and resolve unmatched or ambiguous sensor observations</div>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="refreshSensorIdentityQueue()">↻ Refresh</button>
+      </div>
+      <div id="sensor-queue-container"></div>
+    </div>
+
     <!-- ═══════════════════════════════════════ DISCOVER DEVICES MODAL ══ -->
     <div class="modal-overlay" id="discover-overlay" style="display:none;">
       <div class="modal-box" style="width:580px;max-width:calc(100vw - 24px);">
@@ -2082,10 +2095,10 @@
     if (isSpectator && specCams) loadSpectatorCameras();
 
     // If spectator tries to navigate to restricted page, redirect
-    if (isSpectator && ['inspect','feed','tasks','financials','admin-users','admin-sensors','admin-cameras','apiary'].includes(currentPage)) {
+    if (isSpectator && ['inspect','feed','tasks','financials','admin-users','admin-sensors','admin-cameras','sensor-queue','apiary'].includes(currentPage)) {
       nav('dashboard');
     }
-    if (!isQueen && ['financials','admin-users','admin-sensors','admin-cameras'].includes(currentPage)) {
+    if (!isQueen && ['financials','admin-users','admin-sensors','admin-cameras','sensor-queue'].includes(currentPage)) {
       nav('dashboard');
     }
   }
@@ -2106,8 +2119,8 @@
 
   function nav(page) {
     // Role guards
-    if (currentRole === 'spectator' && ['inspect','feed','health-event','harvest','tasks','financials','admin-users','admin-sensors','admin-cameras','apiary'].includes(page)) return;
-    if (currentRole !== 'queen' && ['financials','admin-users','admin-sensors','admin-cameras'].includes(page)) return;
+    if (currentRole === 'spectator' && ['inspect','feed','health-event','harvest','tasks','financials','admin-users','admin-sensors','admin-cameras','sensor-queue','apiary'].includes(page)) return;
+    if (currentRole !== 'queen' && ['financials','admin-users','admin-sensors','admin-cameras','sensor-queue'].includes(page)) return;
 
     // Inspection session lifecycle
     if (currentPage === 'inspect' && page !== 'inspect') {
@@ -2135,9 +2148,10 @@
       'harvest':      'nav-harvest',
       'tasks':        'nav-tasks',
       'financials':   'nav-financials',
-      'admin-users':  'nav-users',
-      'admin-sensors':'nav-sensors-cfg',
-      'admin-cameras':'nav-cameras-cfg',
+      'admin-users':   'nav-users',
+      'admin-sensors': 'nav-sensors-cfg',
+      'admin-cameras': 'nav-cameras-cfg',
+      'sensor-queue':  'nav-sensor-queue',
     };
     const navEl = pageNavMap[page] ? document.getElementById(pageNavMap[page]) : null;
     if (navEl) navEl.classList.add('active');
@@ -2180,6 +2194,7 @@
     }
     if (page === 'harvest') { autoFillDate('harv-date'); loadHarvestLogs(); }
     if (page === 'admin-sensors') { refreshSensorsTableFromRegistry(); }
+    if (page === 'sensor-queue')  { loadSensorIdentityQueuePage(); }
     // Set today's date on any date field that's empty when its page opens
     if (page === 'financials' || page === 'setup') {
       const today = todayLocalISO();
@@ -8085,6 +8100,28 @@
       showToast('⚠️ ' + (e.message || 'Could not save assignment'));
     } finally {
       if (btn) btn.disabled = false;
+    }
+  }
+
+  // ── Sensor Identity Queue page ────────────────────────────────────────────
+  // Thin wrappers that dynamically import the bundled page module.
+  // Dynamic import is cached after first load so subsequent calls are fast.
+
+  async function loadSensorIdentityQueuePage() {
+    try {
+      const mod = await import('/dist/pages/sensor-identity-queue.js');
+      await mod.loadSensorIdentityQueuePage();
+    } catch (e) {
+      console.error('sensor-identity-queue: failed to load', e);
+    }
+  }
+
+  async function refreshSensorIdentityQueue() {
+    try {
+      const mod = await import('/dist/pages/sensor-identity-queue.js');
+      await mod.refreshSensorIdentityQueue();
+    } catch (e) {
+      console.error('sensor-identity-queue: failed to refresh', e);
     }
   }
 
