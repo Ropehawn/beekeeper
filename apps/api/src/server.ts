@@ -103,6 +103,7 @@ app.get("/health", async (_req, res) => {
 // API routes
 app.use("/api/v1/auth", authLimiter, authRouter);
 app.use("/api/v1/users", usersRouter);
+app.use("/api/v1/hives", hiveCoverageRouter); // must be before hivesRouter (/:id would swallow /coverage)
 app.use("/api/v1/hives", hivesRouter);
 app.use("/api/v1/inspections", inspectionsRouter);
 app.use("/api/v1/feeding", feedingRouter);
@@ -124,7 +125,6 @@ app.use("/api/v1/hubs", hubsRouter);
 app.use("/api/v1/hubs", hubObserveRouter);
 app.use("/api/v1/sensor-identity", sensorIdentityQueueRouter);
 app.use("/api/v1/hubs", nodeHealthRouter);
-app.use("/api/v1/hives", hiveCoverageRouter);
 app.use("/api/v1/cameras", camerasRouter);
 app.use("/api/v1/health-analysis", healthAnalysisRouter);
 
