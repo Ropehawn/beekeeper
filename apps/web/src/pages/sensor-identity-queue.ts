@@ -168,10 +168,10 @@ function renderItem(item: QueueItem): string {
   } else if (item.action === 'hold_for_mac_conflict') {
     actionBtns = `
       <button class="btn btn-sm"
-        style="background:#dc2626;color:#fff;border:1px solid #dc2626;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;"
+        style="background:#dc2626;color:#fff;border:1px solid #dc2626;border-radius:6px;padding:4px 10px;cursor:${busy ? 'not-allowed' : 'pointer'};font-size:12px;${busy ? 'opacity:0.5;' : ''}"
         data-queue-action="force_relink"
         data-item-id="${esc(item.id)}"
-        ${dis}>⚡ Force Relink</button>
+        ${busy ? 'disabled' : ''}>⚡ Force Relink</button>
       <button class="btn btn-secondary btn-sm"
         data-queue-action="dismiss"
         data-item-id="${esc(item.id)}"
