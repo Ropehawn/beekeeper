@@ -24,25 +24,23 @@ export interface CoverageDevice {
   deploymentProfile: string | null;
 }
 
-export interface HiveCoverage {
-  internalClimate: boolean;
-  externalClimate: boolean;
-  scale:           boolean;
-  audio:           boolean;
-}
-
-export interface HiveCoverageDevices {
-  internalClimate: CoverageDevice[];
-  externalClimate: CoverageDevice[];
-  scale:           CoverageDevice[];
-  audio:           CoverageDevice[];
+/** One bucket row — key, display label, coverage flag, and device list come from the server. */
+export interface CoverageBucket {
+  key:     string;
+  label:   string;
+  covered: boolean;
+  devices: CoverageDevice[];
 }
 
 export interface HiveCoverageItem {
-  hiveId:   string;
-  hiveName: string;
-  coverage: HiveCoverage;
-  devices:  HiveCoverageDevices;
+  hiveId:               string;
+  hiveName:             string;
+  /** Total active sensors assigned to this hive */
+  assignedCount:        number;
+  /** Sensors assigned but with no useful deploymentProfile (null or "custom") */
+  withoutProfileCount:  number;
+  /** Ordered bucket array — iterate directly, do not hardcode bucket keys on the client */
+  buckets:              CoverageBucket[];
 }
 
 export interface HiveCoverageResponse {

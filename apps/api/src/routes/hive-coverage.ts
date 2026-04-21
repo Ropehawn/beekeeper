@@ -16,15 +16,26 @@ import { requireAuth, requireRole } from "../middleware/auth";
 
 export const hiveCoverageRouter = Router();
 
-// ── Coverage bucket keys ──────────────────────────────────────────────────────
+// ── Coverage bucket definitions ───────────────────────────────────────────────
+// Ordered list — determines display order on the client.
+// Adding a new bucket here is the only change needed to add it everywhere.
 
-type BucketKey = "internalClimate" | "externalClimate" | "scale" | "audio";
-const BUCKETS: BucketKey[] = ["internalClimate", "externalClimate", "scale", "audio"];
+interface BucketDef {
+  key:   string;
+  label: string;
+}
 
-// ── deploymentProfile → which buckets it satisfies ───────────────────────────
+const BUCKET_DEFS: BucketDef[] = [
+  { key: "internalClimate", label: "Internal Climate"  },
+  { key: "externalClimate", label: "External Climate"  },
+  { key: "scale",           label: "Scale"             },
+  { key: "audio",           label: "Audio"             },
+];
+
+// ── deploymentProfile → which bucket keys it satisfies ───────────────────────
 // custom and null contribute nothing in v1 — explicit rather than silent.
 
-const PROFILE_BUCKETS: Record<string, BucketKey[]> = {
+const PROFILE_BUCKETS: Record<string, string[]> = {
   external_climate_scale_audio: ["externalClimate", "scale", "audio"],
   internal_climate:             ["internalClimate"],
   ambient_reference:            ["externalClimate"],
@@ -33,7 +44,7 @@ const PROFILE_BUCKETS: Record<string, BucketKey[]> = {
   custom:                       [],
 };
 
-function bucketsFor(profile: string | null): BucketKey[] {
+function bucketsFor(profile: string | null): string[] {
   if (!profile) return [];
   return PROFILE_BUCKETS[profile] ?? [];
 }
@@ -87,30 +98,17 @@ hiveCoverageRouter.get(
       const items = hives.map(hive => {
         const hiveDevices = devicesByHive.get(hive.id) ?? [];
 
-        // Per-bucket device lists
-        const bucketDevices: Record<BucketKey, typeof devices> = {
-          internalClimate: [],
-          externalClimate: [],
-          scale:           [],
-          audio:           [],
-        };
+        // Per-bucket device accumulator (keyed by bucket key string)
+        const bucketDevices = new Map<string, typeof devices>();
+        for (const { key } of BUCKET_DEFS) bucketDevices.set(key, []);
 
         for (const d of hiveDevices) {
-          const covered = bucketsFor(d.deploymentProfile);
-          for (const b of covered) {
-            bucketDevices[b].push(d);
+          for (const b of bucketsFor(d.deploymentProfile)) {
+            bucketDevices.get(b)?.push(d);
           }
         }
 
-        // Coverage flags
-        const coverage: Record<BucketKey, boolean> = {
-          internalClimate: bucketDevices.internalClimate.length > 0,
-          externalClimate: bucketDevices.externalClimate.length > 0,
-          scale:           bucketDevices.scale.length > 0,
-          audio:           bucketDevices.audio.length > 0,
-        };
-
-        // Serialise device lists to a clean shape
+        // Serialise device to clean shape
         const deviceEntry = (d: typeof devices[number]) => ({
           id:                d.id,
           name:              d.name ?? d.deviceId,
@@ -119,18 +117,28 @@ hiveCoverageRouter.get(
           deploymentProfile: d.deploymentProfile ?? null,
         });
 
+        // Build the ordered buckets array — labels come from BUCKET_DEFS, not the client
+        const buckets = BUCKET_DEFS.map(({ key, label }) => {
+          const list = bucketDevices.get(key) ?? [];
+          return {
+            key,
+            label,
+            covered: list.length > 0,
+            devices: list.map(deviceEntry),
+          };
+        });
+
+        const missingCount       = buckets.filter(b => !b.covered).length;
+        const assignedCount      = hiveDevices.length;
+        const withoutProfileCount = hiveDevices.filter(d => !d.deploymentProfile || d.deploymentProfile === "custom").length;
+
         return {
-          hiveId:   hive.id,
-          hiveName: hive.name,
-          coverage,
-          devices: {
-            internalClimate: bucketDevices.internalClimate.map(deviceEntry),
-            externalClimate: bucketDevices.externalClimate.map(deviceEntry),
-            scale:           bucketDevices.scale.map(deviceEntry),
-            audio:           bucketDevices.audio.map(deviceEntry),
-          },
-          // Derived: count of missing buckets — used for sort by caller
-          _missingCount: BUCKETS.filter(b => !coverage[b]).length,
+          hiveId:              hive.id,
+          hiveName:            hive.name,
+          assignedCount,
+          withoutProfileCount,
+          buckets,
+          _missingCount: missingCount,
         };
       });
 
