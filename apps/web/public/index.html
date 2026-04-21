@@ -1591,6 +1591,27 @@
             <label class="form-label">Assign to Hive</label>
             <select class="form-input" id="assign-hive-select"></select>
           </div>
+          <div class="form-field">
+            <label class="form-label">Location Role</label>
+            <select class="form-input" id="assign-location-role">
+              <option value="">— unset —</option>
+              <option value="apiary_ambient">Apiary Ambient</option>
+              <option value="hive_exterior">Hive Exterior</option>
+              <option value="entrance">Entrance</option>
+              <option value="inner_cover">Inner Cover</option>
+              <option value="brood_box_upper">Brood Box Upper</option>
+              <option value="brood_box_lower">Brood Box Lower</option>
+              <option value="honey_super">Honey Super</option>
+              <option value="base_scale">Base Scale</option>
+              <option value="under_hive">Under Hive</option>
+              <option value="audio_probe">Audio Probe</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">Location Note <span style="color:#64748b;font-weight:400;">(optional)</span></label>
+            <input class="form-input" id="assign-location-note" type="text" placeholder="e.g. Left side of upper brood box">
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="closeAssignModal()">Cancel</button>
@@ -8069,13 +8090,17 @@
     document.getElementById('assign-name').value = '';
     document.getElementById('assign-device-id').value = '';
     document.getElementById('assign-hive-select').innerHTML = hiveOptsForAssign();
+    document.getElementById('assign-location-role').value = '';
+    document.getElementById('assign-location-note').value = '';
     document.getElementById('assign-overlay').style.display = 'flex';
   }
 
   async function saveAssignment() {
-    const name     = document.getElementById('assign-name').value.trim();
-    const deviceId = document.getElementById('assign-device-id').value.trim();
-    const hiveId   = document.getElementById('assign-hive-select').value; // real UUID or ''
+    const name         = document.getElementById('assign-name').value.trim();
+    const deviceId     = document.getElementById('assign-device-id').value.trim();
+    const hiveId       = document.getElementById('assign-hive-select').value; // real UUID or ''
+    const locationRole = document.getElementById('assign-location-role').value || null;
+    const locationNote = (document.getElementById('assign-location-note').value || '').trim() || null;
 
     if (!name || !deviceId) {
       showToast('⚠️ Name and Device ID are required');
@@ -8093,6 +8118,8 @@
           unifiDeviceId: deviceId,
           hiveId: hiveId || undefined,
           pollInterval: 60,
+          locationRole,
+          locationNote,
         });
         // State was refreshed inside saveSensorAssignment — render from it directly.
         const state = mod.getRegistryPageState();

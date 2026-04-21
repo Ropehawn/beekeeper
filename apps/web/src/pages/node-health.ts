@@ -53,9 +53,10 @@ function renderCard(item: NodeHealthItem): string {
   // ── Hive context line ────────────────────────────────────────────────────
   const contextParts: string[] = [];
   if (item.hiveName)    contextParts.push(item.hiveName);
+  if (item.locationRole) contextParts.push(item.locationRole);
   if (item.deviceLabel) contextParts.push(item.deviceLabel);
   const contextLine = contextParts.length
-    ? contextParts.join(' \u00b7 ')   // "Hive 3 · Node A"
+    ? contextParts.join(' \u00b7 ')   // "Hive 3 · brood_box_upper · Node A"
     : 'Unassigned';
   const contextColor = contextParts.length ? '#94a3b8' : '#475569';
 
@@ -105,8 +106,10 @@ function renderCard(item: NodeHealthItem): string {
       </div>
 
       <!-- Hive context line -->
-      <div style="font-size:12px;color:${contextColor};margin-bottom:6px;` +
+      <div style="font-size:12px;color:${contextColor};margin-bottom:${item.locationNote ? '2px' : '6px'};` +
         `padding-left:16px;">${contextLine}</div>
+
+      ${item.locationNote ? `<div style="font-size:11px;color:#475569;margin-bottom:6px;padding-left:16px;font-style:italic;">${item.locationNote}</div>` : ''}
 
       <!-- Sub-header: vendor · seen · rssi -->
       <div style="display:flex;justify-content:space-between;` +

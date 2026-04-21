@@ -85,6 +85,8 @@ export interface SensorDeviceRecord {
   hiveId: string | null;
   hiveName: string | null;
   pollInterval: number | null;
+  locationRole: string | null;
+  locationNote: string | null;
   createdAt: string;
 }
 
@@ -149,6 +151,8 @@ export async function assignSensorToHive(data: {
   unifiDeviceId: string;
   hiveId?: string;
   pollInterval?: number;
+  locationRole?: string | null;
+  locationNote?: string | null;
 }): Promise<SensorDeviceRecord> {
   return apiFetch('POST', '/api/v1/sensors/devices', data);
 }

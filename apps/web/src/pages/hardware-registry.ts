@@ -285,6 +285,8 @@ export async function saveSensorAssignment(data: {
   unifiDeviceId: string;
   hiveId?: string;
   pollInterval?: number;
+  locationRole?: string | null;
+  locationNote?: string | null;
 }): Promise<void> {
   await assignSensorToHive(data);
   await refreshSensorDevices();

@@ -169,6 +169,12 @@ const ROLE_VALUES      = ["primary_environment", "thermal_map", "weight", "audio
 // Normalised to uppercase before DB write.
 const MAC_RE = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
 
+const LOCATION_ROLE_VALUES = [
+  "apiary_ambient", "hive_exterior", "entrance", "inner_cover",
+  "brood_box_upper", "brood_box_lower", "honey_super",
+  "base_scale", "under_hive", "audio_probe", "custom",
+] as const;
+
 const provisionBodySchema = z.object({
   resolution:        z.literal("provision"),
   assetId:           z.string().min(1).max(50),
@@ -182,6 +188,9 @@ const provisionBodySchema = z.object({
   hiveId:            z.string().uuid().nullable().optional().default(null),
   currentMacAddress: z.string().regex(MAC_RE, "must be a valid MAC address (XX:XX:XX:XX:XX:XX)")
                        .nullable().optional().default(null),
+  // Physical placement within the hive — optional, can be set later via assign UI
+  locationRole:      z.enum(LOCATION_ROLE_VALUES).nullable().optional().default(null),
+  locationNote:      z.string().max(500).nullable().optional().default(null),
 });
 
 // POST /resolve — "select_candidate" body
@@ -555,6 +564,8 @@ router.post(
           hiveId:               body.hiveId ?? null,
           hubId:                event.aggregateId,
           currentMacAddress:    normalizedMac,
+          locationRole:         body.locationRole ?? null,
+          locationNote:         body.locationNote ?? null,
           actorId:              req.user!.id,
           queueItemId:          id,
           existingQueuePayload: existingPayload,

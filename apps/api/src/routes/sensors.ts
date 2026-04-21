@@ -13,11 +13,19 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
 
+const LOCATION_ROLE_VALUES = [
+  "apiary_ambient", "hive_exterior", "entrance", "inner_cover",
+  "brood_box_upper", "brood_box_lower", "honey_super",
+  "base_scale", "under_hive", "audio_probe", "custom",
+] as const;
+
 const deviceSchema = z.object({
   hiveId:        z.string().uuid().optional(),
   unifiDeviceId: z.string().min(1).max(255),
   name:          z.string().min(1).max(255),
   pollInterval:  z.number().int().min(10).max(3600).default(60),
+  locationRole:  z.enum(LOCATION_ROLE_VALUES).nullable().optional(),
+  locationNote:  z.string().max(500).nullable().optional(),
 });
 
 // ── GET /api/v1/sensors/test-connection ───────────────────────────────────────
@@ -178,6 +186,8 @@ router.get("/devices", requireAuth, async (req, res) => {
     hiveId:       d.hiveId,
     hiveName:     d.hiveId ? (hiveMap[d.hiveId] ?? null) : null,
     pollInterval: d.pollInterval,
+    locationRole: d.locationRole ?? null,
+    locationNote: d.locationNote ?? null,
     createdAt:    d.createdAt,
   })));
 });
@@ -200,7 +210,7 @@ router.post("/devices", requireAuth, async (req: AuthRequest, res) => {
     return res.status(400).json({ error: "Invalid input", details: body.error.flatten() });
   }
 
-  const { hiveId, unifiDeviceId, name, pollInterval } = body.data;
+  const { hiveId, unifiDeviceId, name, pollInterval, locationRole, locationNote } = body.data;
 
   if (hiveId) {
     const hive = await db.hive.findUnique({ where: { id: hiveId }, select: { id: true } });
@@ -214,7 +224,14 @@ router.post("/devices", requireAuth, async (req: AuthRequest, res) => {
   if (existing) {
     const updated = await db.sensorDevice.update({
       where: { id: existing.id },
-      data: { hiveId: hiveId ?? null, name, pollInterval, isActive: true },
+      data: {
+        hiveId:       hiveId ?? null,
+        name,
+        pollInterval,
+        isActive:     true,
+        locationRole: locationRole ?? null,
+        locationNote: locationNote ?? null,
+      },
     });
     return res.json(updated);
   }
@@ -227,6 +244,8 @@ router.post("/devices", requireAuth, async (req: AuthRequest, res) => {
       name,
       hiveId:       hiveId ?? null,
       pollInterval,
+      locationRole: locationRole ?? null,
+      locationNote: locationNote ?? null,
       config:       { type: "sensor" } as unknown as Prisma.InputJsonValue,
     },
   });
