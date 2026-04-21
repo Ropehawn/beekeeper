@@ -175,6 +175,15 @@ const LOCATION_ROLE_VALUES = [
   "base_scale", "under_hive", "audio_probe", "custom",
 ] as const;
 
+const DEPLOYMENT_PROFILE_VALUES = [
+  "internal_climate",
+  "ambient_reference",
+  "scale_only",
+  "audio_only",
+  "external_climate_scale_audio",
+  "custom",
+] as const;
+
 const provisionBodySchema = z.object({
   resolution:        z.literal("provision"),
   assetId:           z.string().min(1).max(50),
@@ -191,6 +200,8 @@ const provisionBodySchema = z.object({
   // Physical placement within the hive — optional, can be set later via assign UI
   locationRole:      z.enum(LOCATION_ROLE_VALUES).nullable().optional().default(null),
   locationNote:      z.string().max(500).nullable().optional().default(null),
+  // Analysis-level deployment profile — optional, can be set later via assign UI
+  deploymentProfile: z.enum(DEPLOYMENT_PROFILE_VALUES).nullable().optional().default(null),
 });
 
 // POST /resolve — "select_candidate" body
@@ -564,8 +575,9 @@ router.post(
           hiveId:               body.hiveId ?? null,
           hubId:                event.aggregateId,
           currentMacAddress:    normalizedMac,
-          locationRole:         body.locationRole ?? null,
-          locationNote:         body.locationNote ?? null,
+          locationRole:         body.locationRole      ?? null,
+          locationNote:         body.locationNote      ?? null,
+          deploymentProfile:    body.deploymentProfile ?? null,
           actorId:              req.user!.id,
           queueItemId:          id,
           existingQueuePayload: existingPayload,

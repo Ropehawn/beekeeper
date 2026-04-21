@@ -19,13 +19,23 @@ const LOCATION_ROLE_VALUES = [
   "base_scale", "under_hive", "audio_probe", "custom",
 ] as const;
 
+const DEPLOYMENT_PROFILE_VALUES = [
+  "internal_climate",
+  "ambient_reference",
+  "scale_only",
+  "audio_only",
+  "external_climate_scale_audio",
+  "custom",
+] as const;
+
 const deviceSchema = z.object({
-  hiveId:        z.string().uuid().optional(),
-  unifiDeviceId: z.string().min(1).max(255),
-  name:          z.string().min(1).max(255),
-  pollInterval:  z.number().int().min(10).max(3600).default(60),
-  locationRole:  z.enum(LOCATION_ROLE_VALUES).nullable().optional(),
-  locationNote:  z.string().max(500).nullable().optional(),
+  hiveId:            z.string().uuid().optional(),
+  unifiDeviceId:     z.string().min(1).max(255),
+  name:              z.string().min(1).max(255),
+  pollInterval:      z.number().int().min(10).max(3600).default(60),
+  locationRole:      z.enum(LOCATION_ROLE_VALUES).nullable().optional(),
+  locationNote:      z.string().max(500).nullable().optional(),
+  deploymentProfile: z.enum(DEPLOYMENT_PROFILE_VALUES).nullable().optional(),
 });
 
 // ── GET /api/v1/sensors/test-connection ───────────────────────────────────────
@@ -180,15 +190,16 @@ router.get("/devices", requireAuth, async (req, res) => {
   const hiveMap = Object.fromEntries(hives.map(h => [h.id, h.name]));
 
   return res.json(devices.map(d => ({
-    id:           d.id,
-    deviceId:     d.deviceId,
-    name:         d.name,
-    hiveId:       d.hiveId,
-    hiveName:     d.hiveId ? (hiveMap[d.hiveId] ?? null) : null,
-    pollInterval: d.pollInterval,
-    locationRole: d.locationRole ?? null,
-    locationNote: d.locationNote ?? null,
-    createdAt:    d.createdAt,
+    id:                d.id,
+    deviceId:          d.deviceId,
+    name:              d.name,
+    hiveId:            d.hiveId,
+    hiveName:          d.hiveId ? (hiveMap[d.hiveId] ?? null) : null,
+    pollInterval:      d.pollInterval,
+    locationRole:      d.locationRole      ?? null,
+    locationNote:      d.locationNote      ?? null,
+    deploymentProfile: d.deploymentProfile ?? null,
+    createdAt:         d.createdAt,
   })));
 });
 
@@ -210,7 +221,7 @@ router.post("/devices", requireAuth, async (req: AuthRequest, res) => {
     return res.status(400).json({ error: "Invalid input", details: body.error.flatten() });
   }
 
-  const { hiveId, unifiDeviceId, name, pollInterval, locationRole, locationNote } = body.data;
+  const { hiveId, unifiDeviceId, name, pollInterval, locationRole, locationNote, deploymentProfile } = body.data;
 
   if (hiveId) {
     const hive = await db.hive.findUnique({ where: { id: hiveId }, select: { id: true } });
@@ -225,12 +236,13 @@ router.post("/devices", requireAuth, async (req: AuthRequest, res) => {
     const updated = await db.sensorDevice.update({
       where: { id: existing.id },
       data: {
-        hiveId:       hiveId ?? null,
+        hiveId:            hiveId ?? null,
         name,
         pollInterval,
-        isActive:     true,
-        locationRole: locationRole ?? null,
-        locationNote: locationNote ?? null,
+        isActive:          true,
+        locationRole:      locationRole ?? null,
+        locationNote:      locationNote ?? null,
+        deploymentProfile: deploymentProfile ?? null,
       },
     });
     return res.json(updated);
@@ -238,15 +250,16 @@ router.post("/devices", requireAuth, async (req: AuthRequest, res) => {
 
   const created = await db.sensorDevice.create({
     data: {
-      id:           crypto.randomUUID(),
-      vendor:       "unifi_protect",
-      deviceId:     unifiDeviceId,
+      id:                crypto.randomUUID(),
+      vendor:            "unifi_protect",
+      deviceId:          unifiDeviceId,
       name,
-      hiveId:       hiveId ?? null,
+      hiveId:            hiveId ?? null,
       pollInterval,
-      locationRole: locationRole ?? null,
-      locationNote: locationNote ?? null,
-      config:       { type: "sensor" } as unknown as Prisma.InputJsonValue,
+      locationRole:      locationRole ?? null,
+      locationNote:      locationNote ?? null,
+      deploymentProfile: deploymentProfile ?? null,
+      config:            { type: "sensor" } as unknown as Prisma.InputJsonValue,
     },
   });
 
@@ -298,13 +311,14 @@ router.get("/devices/generate-id", requireAuth, async (req: AuthRequest, res) =>
 const MAC_RE = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
 
 const registerDeviceSchema = z.object({
-  deviceId:     z.string().min(1).max(50),
-  mac:          z.string().regex(MAC_RE, "must be XX:XX:XX:XX:XX:XX"),
-  name:         z.string().min(1).max(255),
-  vendor:       z.string().min(1).max(100).default("generic"),
-  hiveId:       z.string().uuid().nullable().optional(),
-  locationRole: z.enum(LOCATION_ROLE_VALUES).nullable().optional(),
-  locationNote: z.string().max(500).nullable().optional(),
+  deviceId:          z.string().min(1).max(50),
+  mac:               z.string().regex(MAC_RE, "must be XX:XX:XX:XX:XX:XX"),
+  name:              z.string().min(1).max(255),
+  vendor:            z.string().min(1).max(100).default("generic"),
+  hiveId:            z.string().uuid().nullable().optional(),
+  locationRole:      z.enum(LOCATION_ROLE_VALUES).nullable().optional(),
+  locationNote:      z.string().max(500).nullable().optional(),
+  deploymentProfile: z.enum(DEPLOYMENT_PROFILE_VALUES).nullable().optional(),
 });
 
 router.post("/devices/register", requireAuth, async (req: AuthRequest, res) => {
@@ -317,7 +331,7 @@ router.post("/devices/register", requireAuth, async (req: AuthRequest, res) => {
     return res.status(400).json({ error: "Invalid input", details: body.error.flatten() });
   }
 
-  const { deviceId, mac, name, vendor, hiveId, locationRole, locationNote } = body.data;
+  const { deviceId, mac, name, vendor, hiveId, locationRole, locationNote, deploymentProfile } = body.data;
   const macUpper = mac.toUpperCase();
 
   if (hiveId) {
@@ -344,13 +358,14 @@ router.post("/devices/register", requireAuth, async (req: AuthRequest, res) => {
       const updated = await db.sensorDevice.update({
         where: { id: existing.id },
         data: {
-          currentMac:   macUpper,
+          currentMac:        macUpper,
           name,
           vendor,
-          hiveId:       hiveId ?? null,
-          locationRole: locationRole ?? null,
-          locationNote: locationNote ?? null,
-          isActive:     true,
+          hiveId:            hiveId ?? null,
+          locationRole:      locationRole      ?? null,
+          locationNote:      locationNote      ?? null,
+          deploymentProfile: deploymentProfile ?? null,
+          isActive:          true,
         },
       });
       logger.info({ deviceId, mac: macUpper, relinked: existing.currentMac !== macUpper }, "sensor.admin_register.updated");
@@ -359,16 +374,17 @@ router.post("/devices/register", requireAuth, async (req: AuthRequest, res) => {
 
     const created = await db.sensorDevice.create({
       data: {
-        id:           crypto.randomUUID(),
+        id:                crypto.randomUUID(),
         deviceId,
-        currentMac:   macUpper,
+        currentMac:        macUpper,
         vendor,
         name,
-        hiveId:       hiveId ?? null,
-        locationRole: locationRole ?? null,
-        locationNote: locationNote ?? null,
-        provisionedAt: new Date(),
-        config:        { type: "sensor", registered_via: "admin_ui" } as unknown as Prisma.InputJsonValue,
+        hiveId:            hiveId            ?? null,
+        locationRole:      locationRole      ?? null,
+        locationNote:      locationNote      ?? null,
+        deploymentProfile: deploymentProfile ?? null,
+        provisionedAt:     new Date(),
+        config:            { type: "sensor", registered_via: "admin_ui" } as unknown as Prisma.InputJsonValue,
       },
     });
 
@@ -389,10 +405,11 @@ router.post("/devices/register", requireAuth, async (req: AuthRequest, res) => {
 // Returns: the updated SensorDevice row.
 
 const patchDeviceSchema = z.object({
-  name:         z.string().min(1).max(255).optional(),
-  hiveId:       z.string().uuid().nullable().optional(),
-  locationRole: z.enum(LOCATION_ROLE_VALUES).nullable().optional(),
-  locationNote: z.string().max(500).nullable().optional(),
+  name:              z.string().min(1).max(255).optional(),
+  hiveId:            z.string().uuid().nullable().optional(),
+  locationRole:      z.enum(LOCATION_ROLE_VALUES).nullable().optional(),
+  locationNote:      z.string().max(500).nullable().optional(),
+  deploymentProfile: z.enum(DEPLOYMENT_PROFILE_VALUES).nullable().optional(),
 });
 
 router.patch("/devices/:id", requireAuth, async (req: AuthRequest, res) => {
@@ -420,10 +437,11 @@ router.patch("/devices/:id", requireAuth, async (req: AuthRequest, res) => {
 
   // Build update — only include fields explicitly present in the request body
   const data: Record<string, unknown> = {};
-  if (body.data.name         !== undefined) data.name         = body.data.name;
-  if (body.data.hiveId       !== undefined) data.hiveId       = body.data.hiveId;
-  if (body.data.locationRole !== undefined) data.locationRole = body.data.locationRole;
-  if (body.data.locationNote !== undefined) data.locationNote = body.data.locationNote;
+  if (body.data.name              !== undefined) data.name              = body.data.name;
+  if (body.data.hiveId            !== undefined) data.hiveId            = body.data.hiveId;
+  if (body.data.locationRole      !== undefined) data.locationRole      = body.data.locationRole;
+  if (body.data.locationNote      !== undefined) data.locationNote      = body.data.locationNote;
+  if (body.data.deploymentProfile !== undefined) data.deploymentProfile = body.data.deploymentProfile;
 
   const updated = await db.sensorDevice.update({ where: { id }, data });
   logger.info({ deviceId: id, fields: Object.keys(data) }, "Sensor device patched");

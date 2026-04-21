@@ -287,6 +287,7 @@ export async function saveSensorAssignment(data: {
   pollInterval?: number;
   locationRole?: string | null;
   locationNote?: string | null;
+  deploymentProfile?: string | null;
 }): Promise<void> {
   await assignSensorToHive(data);
   await refreshSensorDevices();

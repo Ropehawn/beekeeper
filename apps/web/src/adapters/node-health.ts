@@ -20,8 +20,9 @@ export interface NodeHealthItem {
   hiveId:           string | null;
   hiveName:         string | null;
   deviceLabel:      string | null;
-  locationRole:     string | null;
-  locationNote:     string | null;
+  locationRole:      string | null;
+  locationNote:      string | null;
+  deploymentProfile: string | null;
   // Latest metric values — null when no reading exists in the window
   temperature_c:    number | null;
   humidity_pct:     number | null;

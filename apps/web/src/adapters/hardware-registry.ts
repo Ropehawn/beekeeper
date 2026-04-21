@@ -87,6 +87,7 @@ export interface SensorDeviceRecord {
   pollInterval: number | null;
   locationRole: string | null;
   locationNote: string | null;
+  deploymentProfile: string | null;
   createdAt: string;
 }
 
@@ -153,6 +154,7 @@ export async function assignSensorToHive(data: {
   pollInterval?: number;
   locationRole?: string | null;
   locationNote?: string | null;
+  deploymentProfile?: string | null;
 }): Promise<SensorDeviceRecord> {
   return apiFetch('POST', '/api/v1/sensors/devices', data);
 }

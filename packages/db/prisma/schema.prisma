@@ -424,10 +424,11 @@ model SensorDevice {
   pollInterval   Int       @default(60) @map("poll_interval") // seconds
   isActive       Boolean   @default(true) @map("is_active")
   config         Json? // vendor-specific config, events[], mac_history[]
-  locationRole   String?   @map("location_role")  // apiary_ambient | hive_exterior | entrance | inner_cover | brood_box_upper | brood_box_lower | honey_super | base_scale | under_hive | audio_probe | custom
-  locationNote   String?   @map("location_note")
-  provisionedAt  DateTime? @map("provisioned_at")
-  createdAt      DateTime  @default(now()) @map("created_at")
+  locationRole      String?   @map("location_role")       // apiary_ambient | hive_exterior | entrance | inner_cover | brood_box_upper | brood_box_lower | honey_super | base_scale | under_hive | audio_probe | custom
+  locationNote      String?   @map("location_note")
+  deploymentProfile String?   @map("deployment_profile")  // internal_climate | ambient_reference | scale_only | audio_only | external_climate_scale_audio | custom
+  provisionedAt     DateTime? @map("provisioned_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
 
   readings    SensorReading[]
   rawReadings SensorReadingRaw[]
@@ -785,8 +786,9 @@ model SensorRegistry {
   pollingIntervalSec Int?      @map("polling_interval_sec")
   firmwareVersion    String?   @map("firmware_version")
   notes              String?
-  locationRole       String?   @map("location_role")  // apiary_ambient | hive_exterior | entrance | inner_cover | brood_box_upper | brood_box_lower | honey_super | base_scale | under_hive | audio_probe | custom
+  locationRole       String?   @map("location_role")       // apiary_ambient | hive_exterior | entrance | inner_cover | brood_box_upper | brood_box_lower | honey_super | base_scale | under_hive | audio_probe | custom
   locationNote       String?   @map("location_note")
+  deploymentProfile  String?   @map("deployment_profile")  // internal_climate | ambient_reference | scale_only | audio_only | external_climate_scale_audio | custom
   labelPrinted       Boolean   @default(false) @map("label_printed")
   provisionedAt      DateTime? @map("provisioned_at")
   assignedAt         DateTime? @map("assigned_at")

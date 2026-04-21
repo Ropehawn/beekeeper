@@ -77,11 +77,12 @@ const ACTION_BADGE_STYLE: Record<QueueItem['action'], string> = {
   hold_for_mac_conflict: 'background:#fee2e2;color:#991b1b',
 };
 
-const VENDORS:         readonly string[] = ['tachyon','unifi_protect','sensorpush','ecowitt','mokosmart','fanstel','generic'];
-const MODELS:          readonly string[] = ['sc833f','s05t','bme280','hx711','inmp441','generic'];
-const TRANSPORTS:      readonly string[] = ['ble','gpio','csi','cloud','manual'];
-const ROLES:           readonly string[] = ['primary_environment','thermal_map','weight','audio','entrance_camera','apiary_camera','ambient_weather','unknown'];
-const LOCATION_ROLES:  readonly string[] = ['','apiary_ambient','hive_exterior','entrance','inner_cover','brood_box_upper','brood_box_lower','honey_super','base_scale','under_hive','audio_probe','custom'];
+const VENDORS:             readonly string[] = ['tachyon','unifi_protect','sensorpush','ecowitt','mokosmart','fanstel','generic'];
+const MODELS:              readonly string[] = ['sc833f','s05t','bme280','hx711','inmp441','generic'];
+const TRANSPORTS:          readonly string[] = ['ble','gpio','csi','cloud','manual'];
+const ROLES:               readonly string[] = ['primary_environment','thermal_map','weight','audio','entrance_camera','apiary_camera','ambient_weather','unknown'];
+const LOCATION_ROLES:      readonly string[] = ['','apiary_ambient','hive_exterior','entrance','inner_cover','brood_box_upper','brood_box_lower','honey_super','base_scale','under_hive','audio_probe','custom'];
+const DEPLOYMENT_PROFILES: readonly string[] = ['','internal_climate','ambient_reference','scale_only','audio_only','external_climate_scale_audio','custom'];
 
 function opts(vals: readonly string[]): string {
   return vals.map(v => `<option value="${v}">${v}</option>`).join('');
@@ -286,6 +287,13 @@ function renderProvisionForm(itemId: string): string {
           <label style="${labelStyle}">Location Note</label>
           <input id="pf-locnote-${id}" type="text" placeholder="optional" style="${inputStyle}">
         </div>
+        <div>
+          <label style="${labelStyle}">Deployment Profile</label>
+          <select id="pf-profile-${id}" style="${inputStyle}">
+            <option value="">— unset —</option>
+            ${opts(DEPLOYMENT_PROFILES.filter(v => v !== ''))}
+          </select>
+        </div>
       </div>
       <div style="margin-top:10px;display:flex;gap:8px;">
         <button class="btn btn-primary btn-sm" data-provision-submit="${id}">✓ Submit</button>
@@ -369,10 +377,11 @@ async function handleProvisionSubmit(btn: HTMLElement): Promise<void> {
   const model     = val(`pf-model-${itemId}`);
   const transport = val(`pf-transport-${itemId}`);
   const role      = val(`pf-role-${itemId}`);
-  const mac          = val(`pf-mac-${itemId}`)     || null;
-  const hiveId       = val(`pf-hiveid-${itemId}`)  || null;
-  const locationRole = val(`pf-locrole-${itemId}`) || null;
-  const locationNote = val(`pf-locnote-${itemId}`) || null;
+  const mac              = val(`pf-mac-${itemId}`)     || null;
+  const hiveId           = val(`pf-hiveid-${itemId}`)  || null;
+  const locationRole     = val(`pf-locrole-${itemId}`) || null;
+  const locationNote     = val(`pf-locnote-${itemId}`) || null;
+  const deploymentProfile = val(`pf-profile-${itemId}`) || null;
 
   if (!assetId || !name) {
     itemErrors.set(itemId, 'Asset ID and Name are required.');
@@ -393,6 +402,7 @@ async function handleProvisionSubmit(btn: HTMLElement): Promise<void> {
       hiveId,
       locationRole,
       locationNote,
+      deploymentProfile,
     }),
   );
 }

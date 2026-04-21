@@ -97,29 +97,32 @@ nodeHealthRouter.get(
             select: {
               id: true, deviceId: true, currentMac: true,
               hiveId: true, name: true, locationRole: true, locationNote: true,
+              deploymentProfile: true,
             },
           })
         : [];
 
       // Build mac → context map
       const macToDevice = new Map<string, {
-        sensorDeviceId: string;
-        sensorQrId:     string;
-        hiveId:         string | null;
-        deviceLabel:    string | null;
-        locationRole:   string | null;
-        locationNote:   string | null;
+        sensorDeviceId:   string;
+        sensorQrId:       string;
+        hiveId:           string | null;
+        deviceLabel:      string | null;
+        locationRole:     string | null;
+        locationNote:     string | null;
+        deploymentProfile: string | null;
       }>();
       const hiveIdSet   = new Set<string>();
       for (const d of devices) {
         if (!d.currentMac) continue;
         macToDevice.set(d.currentMac.toUpperCase(), {
-          sensorDeviceId: d.id,
-          sensorQrId:     d.deviceId,
-          hiveId:         d.hiveId       ?? null,
-          deviceLabel:    d.name         ?? null,
-          locationRole:   d.locationRole ?? null,
-          locationNote:   d.locationNote ?? null,
+          sensorDeviceId:   d.id,
+          sensorQrId:       d.deviceId,
+          hiveId:           d.hiveId            ?? null,
+          deviceLabel:      d.name              ?? null,
+          locationRole:     d.locationRole      ?? null,
+          locationNote:     d.locationNote      ?? null,
+          deploymentProfile: d.deploymentProfile ?? null,
         });
         if (d.hiveId) hiveIdSet.add(d.hiveId);
       }
@@ -143,15 +146,16 @@ nodeHealthRouter.get(
         const status: "green" | "yellow" | "red" =
           ageSec < 15 ? "green" : ageSec < 60 ? "yellow" : "red";
 
-        const macUpper       = dev.deviceMac.toUpperCase();
-        const devEntry       = macToDevice.get(macUpper);
-        const sensorDeviceId = devEntry?.sensorDeviceId ?? null;
-        const sensorQrId     = devEntry?.sensorQrId     ?? null;
-        const hiveId         = devEntry?.hiveId         ?? null;
-        const hiveName       = hiveId ? (hiveIdToName.get(hiveId) ?? null) : null;
-        const deviceLabel    = devEntry?.deviceLabel     ?? null;
-        const locationRole   = devEntry?.locationRole    ?? null;
-        const locationNote   = devEntry?.locationNote    ?? null;
+        const macUpper        = dev.deviceMac.toUpperCase();
+        const devEntry        = macToDevice.get(macUpper);
+        const sensorDeviceId  = devEntry?.sensorDeviceId  ?? null;
+        const sensorQrId      = devEntry?.sensorQrId      ?? null;
+        const hiveId          = devEntry?.hiveId          ?? null;
+        const hiveName        = hiveId ? (hiveIdToName.get(hiveId) ?? null) : null;
+        const deviceLabel     = devEntry?.deviceLabel      ?? null;
+        const locationRole    = devEntry?.locationRole     ?? null;
+        const locationNote    = devEntry?.locationNote     ?? null;
+        const deploymentProfile = devEntry?.deploymentProfile ?? null;
 
         return {
           deviceMac:    dev.deviceMac,
@@ -169,6 +173,7 @@ nodeHealthRouter.get(
           deviceLabel,
           locationRole,
           locationNote,
+          deploymentProfile,
           // Latest metric values
           temperature_c:    dev.metrics.temperature_c    ?? null,
           humidity_pct:     dev.metrics.humidity_pct     ?? null,

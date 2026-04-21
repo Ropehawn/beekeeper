@@ -241,6 +241,7 @@ export interface ProvisionNewInput {
   currentMacAddress: string | null;   // normalized (uppercase/trimmed) before call
   locationRole:      string | null;   // physical placement within the hive
   locationNote:      string | null;   // free-form placement note
+  deploymentProfile: string | null;   // analysis-level deployment profile
   // Derived from the queue item's observation context — not in the request body
   deviceIdentifier:  string;          // observation.deviceIdentifier ?? assetId
   hubId:             string | null;   // domain_events.aggregateId
@@ -317,6 +318,7 @@ export async function persistProvisionNew(input: ProvisionNewInput): Promise<str
         role:              input.role,
         locationRole:      input.locationRole,
         locationNote:      input.locationNote,
+        deploymentProfile: input.deploymentProfile,
         labelPrinted:      false,
         provisionedAt:     now,
       },

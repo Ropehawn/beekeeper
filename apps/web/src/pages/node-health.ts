@@ -43,6 +43,22 @@ function badge(label: string): string {
     `border-radius:4px;padding:1px 5px;line-height:16px;">${label}</span>`;
 }
 
+const PROFILE_LABEL: Record<string, string> = {
+  internal_climate:             'Internal Climate',
+  ambient_reference:            'Ambient Ref',
+  scale_only:                   'Scale',
+  audio_only:                   'Audio',
+  external_climate_scale_audio: 'Ext+Scale+Audio',
+  custom:                       'Custom',
+};
+
+function profileBadge(profile: string): string {
+  const label = PROFILE_LABEL[profile] ?? profile;
+  return `<span style="display:inline-block;font-size:10px;font-weight:600;` +
+    `color:#7dd3fc;background:#0c1a2e;border:1px solid #1e40af;` +
+    `border-radius:4px;padding:1px 5px;line-height:16px;">${label}</span>`;
+}
+
 function metricRow(label: string, value: string): string {
   return `<div style="display:flex;justify-content:space-between;` +
     `font-size:12px;line-height:18px;color:#cbd5e1;">` +
@@ -90,6 +106,7 @@ function renderCard(item: NodeHealthItem): string {
 
   // ── Capability badges ────────────────────────────────────────────────────
   const badges: string[] = [];
+  if (item.deploymentProfile) badges.push(profileBadge(item.deploymentProfile));
   if (item.bme) badges.push(badge('BME'));
   if (item.hx)  badges.push(badge('HX711'));
   if (item.mic) badges.push(badge('MIC'));
@@ -114,6 +131,7 @@ function renderCard(item: NodeHealthItem): string {
         `data-hive-id="${escAttr(item.hiveId ?? '')}" ` +
         `data-loc-role="${escAttr(item.locationRole ?? '')}" ` +
         `data-loc-note="${escAttr(item.locationNote ?? '')}" ` +
+        `data-deployment-profile="${escAttr(item.deploymentProfile ?? '')}" ` +
         `style="${btnStyle}color:#64748b;">✎ Edit</button>`
     : `<button onclick="openNodeRegisterModal(this)" ` +
         `data-mac="${escAttr(item.deviceMac)}" ` +

@@ -1612,6 +1612,18 @@
             <label class="form-label">Location Note <span style="color:#64748b;font-weight:400;">(optional)</span></label>
             <input class="form-input" id="assign-location-note" type="text" placeholder="e.g. Left side of upper brood box">
           </div>
+          <div class="form-field">
+            <label class="form-label">Deployment Profile <span style="color:#64748b;font-weight:400;">(optional)</span></label>
+            <select class="form-input" id="assign-deployment-profile">
+              <option value="">— unset —</option>
+              <option value="internal_climate">Internal Climate</option>
+              <option value="ambient_reference">Ambient Reference</option>
+              <option value="scale_only">Scale Only</option>
+              <option value="audio_only">Audio Only</option>
+              <option value="external_climate_scale_audio">External + Scale + Audio</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="closeAssignModal()">Cancel</button>
@@ -1694,6 +1706,18 @@
             <input class="form-input" id="node-register-location-note" type="text"
               placeholder="e.g. Under hive 3, left side">
           </div>
+          <div class="form-field">
+            <label class="form-label">Deployment Profile <span style="color:#64748b;font-weight:400;">(optional)</span></label>
+            <select class="form-input" id="node-register-deployment-profile">
+              <option value="">— unset —</option>
+              <option value="internal_climate">Internal Climate</option>
+              <option value="ambient_reference">Ambient Reference</option>
+              <option value="scale_only">Scale Only</option>
+              <option value="audio_only">Audio Only</option>
+              <option value="external_climate_scale_audio">External + Scale + Audio</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" onclick="closeNodeRegisterModal()">Cancel</button>
@@ -1737,6 +1761,18 @@
           <div class="form-field">
             <label class="form-label">Location Note <span style="color:#64748b;font-weight:400;">(optional)</span></label>
             <input class="form-input" id="node-edit-location-note" type="text" placeholder="e.g. Left side of upper brood box">
+          </div>
+          <div class="form-field">
+            <label class="form-label">Deployment Profile <span style="color:#64748b;font-weight:400;">(optional)</span></label>
+            <select class="form-input" id="node-edit-deployment-profile">
+              <option value="">— unset —</option>
+              <option value="internal_climate">Internal Climate</option>
+              <option value="ambient_reference">Ambient Reference</option>
+              <option value="scale_only">Scale Only</option>
+              <option value="audio_only">Audio Only</option>
+              <option value="external_climate_scale_audio">External + Scale + Audio</option>
+              <option value="custom">Custom</option>
+            </select>
           </div>
         </div>
         <div class="modal-footer">
@@ -8218,15 +8254,17 @@
     document.getElementById('assign-hive-select').innerHTML = hiveOptsForAssign();
     document.getElementById('assign-location-role').value = '';
     document.getElementById('assign-location-note').value = '';
+    document.getElementById('assign-deployment-profile').value = '';
     document.getElementById('assign-overlay').style.display = 'flex';
   }
 
   async function saveAssignment() {
-    const name         = document.getElementById('assign-name').value.trim();
-    const deviceId     = document.getElementById('assign-device-id').value.trim();
-    const hiveId       = document.getElementById('assign-hive-select').value; // real UUID or ''
-    const locationRole = document.getElementById('assign-location-role').value || null;
-    const locationNote = (document.getElementById('assign-location-note').value || '').trim() || null;
+    const name              = document.getElementById('assign-name').value.trim();
+    const deviceId          = document.getElementById('assign-device-id').value.trim();
+    const hiveId            = document.getElementById('assign-hive-select').value; // real UUID or ''
+    const locationRole      = document.getElementById('assign-location-role').value || null;
+    const locationNote      = (document.getElementById('assign-location-note').value || '').trim() || null;
+    const deploymentProfile = document.getElementById('assign-deployment-profile').value || null;
 
     if (!name || !deviceId) {
       showToast('⚠️ Name and Device ID are required');
@@ -8246,6 +8284,7 @@
           pollInterval: 60,
           locationRole,
           locationNote,
+          deploymentProfile,
         });
         // State was refreshed inside saveSensorAssignment — render from it directly.
         const state = mod.getRegistryPageState();
@@ -8547,9 +8586,10 @@
     document.getElementById('node-register-device-id').value        = '';
     document.getElementById('node-register-name').value             = '';
     document.getElementById('node-register-hive-select').innerHTML  = hiveOptsForAssign();
-    document.getElementById('node-register-location-role').value    = '';
-    document.getElementById('node-register-location-note').value    = '';
-    document.getElementById('node-register-title').textContent      = 'Register Sensor';
+    document.getElementById('node-register-location-role').value        = '';
+    document.getElementById('node-register-location-note').value        = '';
+    document.getElementById('node-register-deployment-profile').value   = '';
+    document.getElementById('node-register-title').textContent          = 'Register Sensor';
     document.getElementById('node-register-sub').textContent        = mac + ' · ' + vendor;
     document.getElementById('node-register-qr-panel').style.display   = 'none';
     document.getElementById('node-register-print-btn').style.display  = 'none';
@@ -8558,13 +8598,14 @@
   }
 
   async function saveNodeRegister() {
-    const mac          = document.getElementById('node-register-mac').value;
-    const vendor       = document.getElementById('node-register-vendor').value;
-    const deviceId     = document.getElementById('node-register-device-id').value.trim();
-    const name         = document.getElementById('node-register-name').value.trim();
-    const hiveId       = document.getElementById('node-register-hive-select').value || null;
-    const locationRole = document.getElementById('node-register-location-role').value || null;
-    const locationNote = (document.getElementById('node-register-location-note').value || '').trim() || null;
+    const mac               = document.getElementById('node-register-mac').value;
+    const vendor            = document.getElementById('node-register-vendor').value;
+    const deviceId          = document.getElementById('node-register-device-id').value.trim();
+    const name              = document.getElementById('node-register-name').value.trim();
+    const hiveId            = document.getElementById('node-register-hive-select').value || null;
+    const locationRole      = document.getElementById('node-register-location-role').value || null;
+    const locationNote      = (document.getElementById('node-register-location-note').value || '').trim() || null;
+    const deploymentProfile = document.getElementById('node-register-deployment-profile').value || null;
 
     if (!deviceId || !name) {
       showToast('⚠️ Sensor ID and Name are required');
@@ -8579,7 +8620,7 @@
       const res = await fetch('/api/v1/sensors/devices/register', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-        body:    JSON.stringify({ deviceId, mac, name, vendor, hiveId, locationRole, locationNote }),
+        body:    JSON.stringify({ deviceId, mac, name, vendor, hiveId, locationRole, locationNote, deploymentProfile }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -8605,20 +8646,22 @@
     document.getElementById('node-edit-name').value               = btn.dataset.name    || '';
     document.getElementById('node-edit-hive-select').innerHTML    = hiveOptsForAssign();
     document.getElementById('node-edit-hive-select').value        = btn.dataset.hiveId  || '';
-    document.getElementById('node-edit-location-role').value      = btn.dataset.locRole || '';
-    document.getElementById('node-edit-location-note').value      = btn.dataset.locNote || '';
-    document.getElementById('node-edit-title').textContent        = 'Edit Sensor' + (qrId ? ' · ' + qrId : '');
+    document.getElementById('node-edit-location-role').value          = btn.dataset.locRole          || '';
+    document.getElementById('node-edit-location-note').value          = btn.dataset.locNote          || '';
+    document.getElementById('node-edit-deployment-profile').value     = btn.dataset.deploymentProfile || '';
+    document.getElementById('node-edit-title').textContent            = 'Edit Sensor' + (qrId ? ' · ' + qrId : '');
     document.getElementById('node-edit-sub').textContent          = btn.closest('[style*="border:1px"]')
       ?.querySelector('span[style*="monospace"]')?.textContent || 'Update placement and name';
     document.getElementById('node-edit-overlay').style.display    = 'flex';
   }
 
   async function saveNodeEdit() {
-    const deviceId    = document.getElementById('node-edit-device-id').value;
-    const name        = document.getElementById('node-edit-name').value.trim();
-    const hiveId      = document.getElementById('node-edit-hive-select').value || null;
-    const locationRole = document.getElementById('node-edit-location-role').value || null;
-    const locationNote = (document.getElementById('node-edit-location-note').value || '').trim() || null;
+    const deviceId        = document.getElementById('node-edit-device-id').value;
+    const name            = document.getElementById('node-edit-name').value.trim();
+    const hiveId          = document.getElementById('node-edit-hive-select').value || null;
+    const locationRole    = document.getElementById('node-edit-location-role').value || null;
+    const locationNote    = (document.getElementById('node-edit-location-note').value || '').trim() || null;
+    const deploymentProfile = document.getElementById('node-edit-deployment-profile').value || null;
 
     const btn = document.querySelector('#node-edit-overlay .btn-primary');
     if (btn) btn.disabled = true;
@@ -8626,10 +8669,11 @@
     try {
       const token = localStorage.getItem('beekeeper_token');
       const body = {};
-      if (name)         body.name         = name;
-      if (hiveId !== undefined) body.hiveId = hiveId;
-      body.locationRole = locationRole;
-      body.locationNote = locationNote;
+      if (name)                  body.name              = name;
+      if (hiveId !== undefined)  body.hiveId            = hiveId;
+      body.locationRole      = locationRole;
+      body.locationNote      = locationNote;
+      body.deploymentProfile = deploymentProfile;
 
       const res = await fetch('/api/v1/sensors/devices/' + deviceId, {
         method:  'PATCH',

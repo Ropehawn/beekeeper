@@ -110,6 +110,7 @@ export async function resolveProvision(id: string, body: {
   hiveId:            string | null;
   locationRole?:     string | null;
   locationNote?:     string | null;
+  deploymentProfile?: string | null;
 }): Promise<void> {
   await apiFetch('POST', `/api/v1/sensor-identity/review-queue/${id}/resolve`, body);
 }
