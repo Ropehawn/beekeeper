@@ -194,6 +194,34 @@ export class RetiredRecordError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// ConflictDriftedError
+//
+// Thrown by persistForceRelink() when the contested MAC is no longer owned by
+// any registry record at resolution time — neither by the conflicting record B
+// nor by the matched record A. This means the original conflict has drifted
+// (e.g. B was decommissioned or its MAC was updated) before the operator acted.
+//
+// Surfaced as HTTP 409 so the operator can re-evaluate the queue item rather
+// than silently force-writing a MAC that may no longer be relevant.
+// ---------------------------------------------------------------------------
+
+export class ConflictDriftedError extends Error {
+  readonly registryId:   string;
+  readonly contestedMac: string;
+
+  constructor(registryId: string, contestedMac: string) {
+    super(
+      `MAC ${contestedMac} is no longer owned by any registry record. ` +
+      `The conflict that created this queue item may have been resolved by other means. ` +
+      `Re-evaluate the queue item before proceeding.`,
+    );
+    this.name         = "ConflictDriftedError";
+    this.registryId   = registryId;
+    this.contestedMac = contestedMac;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ProvisionNewInput
 //
 // Parameter bag for persistProvisionNew(). Kept as an interface rather than
@@ -328,7 +356,13 @@ export async function persistProvisionNew(input: ProvisionNewInput): Promise<str
   });
 
   logger.info(
-    { registryId, assetId: input.assetId, queueItemId: input.queueItemId },
+    {
+      resolution:        "provision",
+      queueItemId:       input.queueItemId,
+      hubId:             input.hubId,
+      createdRegistryId: registryId,
+      assetId:           input.assetId,
+    },
     "sensor-registry: new device provisioned from review queue",
   );
 
@@ -497,9 +531,11 @@ export async function persistSelectCandidate(input: SelectCandidateInput): Promi
 
   logger.info(
     {
-      registryId:     input.registryId,
-      queueItemId:    input.queueItemId,
-      relinkRequired: input.relinkRequired,
+      resolution:         "select_candidate",
+      queueItemId:        input.queueItemId,
+      hubId:              input.hubId,
+      selectedRegistryId: input.registryId,
+      relinkRequired:     input.relinkRequired,
     },
     "sensor-registry: ambiguous candidate selected from review queue",
   );
@@ -587,7 +623,7 @@ export async function persistForceRelink(
     // ── 1. Verify record A exists and is not retired ────────────────────────
     const recordA = await tx.sensorRegistry.findUnique({
       where:  { id: input.matchedRegistryId },
-      select: { id: true, lifecycleStatus: true },
+      select: { id: true, lifecycleStatus: true, currentMacAddress: true },
     });
     if (recordA === null || recordA.lifecycleStatus === "retired") {
       throw new RetiredRecordError(input.matchedRegistryId);
@@ -605,6 +641,14 @@ export async function persistForceRelink(
       select: { id: true },
     });
     revokedFromRegistryId = recordB?.id ?? null;
+
+    // ── Guard: conflict has drifted ──────────────────────────────────────────
+    // If neither B nor A currently owns the contested MAC, the conflict that
+    // created this queue item no longer exists. Throw rather than silently
+    // writing a potentially stale MAC — the operator should re-evaluate.
+    if (recordB === null && recordA.currentMacAddress !== input.contestedMac) {
+      throw new ConflictDriftedError(input.matchedRegistryId, input.contestedMac);
+    }
 
     // ── 3. Revoke MAC from B (if B still holds it) ──────────────────────────
     if (recordB !== null) {
@@ -685,10 +729,12 @@ export async function persistForceRelink(
 
   logger.info(
     {
+      resolution:            "force_relink",
+      queueItemId:           input.queueItemId,
+      hubId:                 input.hubId,
       targetRegistryId:      input.matchedRegistryId,
       contestedMac:          input.contestedMac,
       revokedFromRegistryId,
-      queueItemId:           input.queueItemId,
     },
     "sensor-registry: MAC force-relinked from review queue",
   );

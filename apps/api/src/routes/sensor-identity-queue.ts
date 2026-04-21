@@ -36,6 +36,7 @@ import {
   AssetIdConflictError,
   MacCollisionError,
   RetiredRecordError,
+  ConflictDriftedError,
 } from "../lib/sensor-registry-db";
 import { isValidAssetId } from "../../../../packages/domain/hardware/actions";
 
@@ -321,7 +322,7 @@ router.post(
     // Load the item — confirm it exists, is the right event type, and is pending.
     const event = await db.domainEvent.findUnique({
       where:  { id },
-      select: { id: true, eventType: true, processedAt: true, payload: true },
+      select: { id: true, eventType: true, processedAt: true, payload: true, aggregateId: true },
     });
 
     if (!event || event.eventType !== "sensor.identity.review_queued") {
@@ -361,7 +362,13 @@ router.post(
     });
 
     logger.info(
-      { eventId: id, dismissedBy: req.user!.id, reason: reason ?? null },
+      {
+        resolution:  "dismiss",
+        queueItemId: id,
+        hubId:       event.aggregateId,
+        dismissedBy: req.user!.id,
+        reason:      reason ?? null,
+      },
       "sensor-identity-queue: item dismissed",
     );
 
@@ -812,6 +819,13 @@ router.post(
         return res.status(409).json({
           error:      err.message,
           registryId: err.registryId,
+        });
+      }
+      if (err instanceof ConflictDriftedError) {
+        return res.status(409).json({
+          error:        err.message,
+          registryId:   err.registryId,
+          contestedMac: err.contestedMac,
         });
       }
       logger.error(
