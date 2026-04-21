@@ -314,6 +314,176 @@ export async function persistProvisionNew(input: ProvisionNewInput): Promise<str
 }
 
 // ---------------------------------------------------------------------------
+// SelectCandidateInput
+//
+// Parameter bag for persistSelectCandidate(). Carries the minimum context
+// needed to resolve an ambiguous_match queue item by linking it to a
+// specific registry candidate chosen by an operator.
+// ---------------------------------------------------------------------------
+
+export interface SelectCandidateInput {
+  // The candidate registry record the operator selected
+  registryId:           string;
+  // From the original observation — used to update the registry record.
+  // null when no MAC was reported in the observation (e.g. QR-scan-only).
+  observedMacAddress:   string | null;
+  deviceIdentifier:     string | null;
+  // From reconciliation.previousMac — written into the audit event payload
+  // so the audit trail shows what was there before the change.
+  previousMac:          string | null;
+  // Derived by the caller:
+  //   reconciliation.relinkRequired && !crossTierConflict && observedMac !== null
+  // When true: write currentMacAddress + mac_updated event.
+  // When false: sync deviceIdentifier only + identity_confirmed event.
+  relinkRequired:       boolean;
+  // Actor who resolved the item
+  actorId:              string;
+  // The domain_events row being resolved
+  queueItemId:          string;
+  // Hub that reported the original observation
+  hubId:                string;
+  // Existing queue item payload — spread before appending resolution fields
+  existingQueuePayload: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// persistSelectCandidate
+//
+// Called when an operator resolves a 'needs_manual_review' queue item by
+// selecting which registry record the observation belongs to (ambiguous_match
+// means the pipeline found multiple candidates and could not auto-pick one).
+//
+// Runs entirely inside a single Prisma transaction.
+//
+// When relinkRequired is true (and observedMacAddress is non-null):
+//   1. Pre-flight: MAC uniqueness check (excludes selected record) — MacCollisionError
+//   2. sensorRegistry.update — writes currentMacAddress + optional deviceIdentifier
+//   3. provisioningEvent.create — eventType: 'mac_updated'
+//
+// When relinkRequired is false (confirm, no MAC change):
+//   1. sensorRegistry.update — syncs deviceIdentifier only (skipped if null)
+//   2. provisioningEvent.create — eventType: 'identity_confirmed'
+//
+// Always (both paths):
+//   N. domainEvent.update — sets processedAt + appends resolution metadata
+//
+// Sealing the queue item inside the same transaction as the registry write
+// ensures either both succeed or both roll back — no half-resolved items.
+//
+// Throws:
+//   MacCollisionError  — observedMacAddress already owned by another record
+//   Any Prisma error   — unexpected (HTTP 500)
+// ---------------------------------------------------------------------------
+
+export async function persistSelectCandidate(input: SelectCandidateInput): Promise<void> {
+  const now = new Date();
+
+  await db.$transaction(async (tx: any) => {
+    if (input.relinkRequired && input.observedMacAddress !== null) {
+      // ── Belt: re-check MAC uniqueness inside the transaction ───────────────
+      // The pipeline cleared crossTierConflict before queuing, but another
+      // request could have claimed this MAC in the interim.
+      const collision = await tx.sensorRegistry.findFirst({
+        where: {
+          currentMacAddress: input.observedMacAddress,
+          id:                { not: input.registryId },
+        },
+        select: { id: true },
+      });
+      if (collision !== null) {
+        throw new MacCollisionError(input.observedMacAddress, collision.id);
+      }
+
+      // ── Update currentMacAddress (+ optional deviceIdentifier) ────────────
+      await tx.sensorRegistry.update({
+        where: { id: input.registryId },
+        data: {
+          currentMacAddress: input.observedMacAddress,
+          ...(input.deviceIdentifier !== null && {
+            deviceIdentifier: input.deviceIdentifier,
+          }),
+        },
+      });
+
+      // ── Audit: MAC change triggered by operator candidate selection ────────
+      await tx.provisioningEvent.create({
+        data: {
+          id:         crypto.randomUUID(),
+          registryId: input.registryId,
+          eventType:  "mac_updated",
+          actorId:    input.actorId,
+          occurredAt: now,
+          payload: {
+            source:           "review_queue_resolve",
+            queueItemId:      input.queueItemId,
+            hubId:            input.hubId,
+            previousMac:      input.previousMac,
+            newMac:           input.observedMacAddress,
+            deviceIdentifier: input.deviceIdentifier,
+          },
+        },
+      });
+
+    } else {
+      // ── Sync deviceIdentifier only — no MAC change required ───────────────
+      // Never blank out an existing identifier: a null observation means
+      // "not reported this time", not "the device lost its identifier".
+      if (input.deviceIdentifier !== null) {
+        await tx.sensorRegistry.update({
+          where: { id: input.registryId },
+          data:  { deviceIdentifier: input.deviceIdentifier },
+        });
+      }
+
+      // ── Audit: identity confirmed without MAC change ───────────────────────
+      await tx.provisioningEvent.create({
+        data: {
+          id:         crypto.randomUUID(),
+          registryId: input.registryId,
+          eventType:  "identity_confirmed",
+          actorId:    input.actorId,
+          occurredAt: now,
+          payload: {
+            source:           "review_queue_resolve",
+            queueItemId:      input.queueItemId,
+            hubId:            input.hubId,
+            observedMac:      input.observedMacAddress,
+            deviceIdentifier: input.deviceIdentifier,
+          },
+        },
+      });
+    }
+
+    // ── Seal the queue item ───────────────────────────────────────────────────
+    // processedAt marks it resolved. Resolution metadata is appended to the
+    // original payload so the complete context (observation + who selected +
+    // which record was chosen) lives in one place.
+    await tx.domainEvent.update({
+      where: { id: input.queueItemId },
+      data: {
+        processedAt: now,
+        payload: {
+          ...input.existingQueuePayload,
+          resolvedBy:         input.actorId,
+          resolvedAt:         now.toISOString(),
+          resolution:         "select_candidate",
+          selectedRegistryId: input.registryId,
+        },
+      },
+    });
+  });
+
+  logger.info(
+    {
+      registryId:     input.registryId,
+      queueItemId:    input.queueItemId,
+      relinkRequired: input.relinkRequired,
+    },
+    "sensor-registry: ambiguous candidate selected from review queue",
+  );
+}
+
+// ---------------------------------------------------------------------------
 // loadRegistryRecordsForHub
 //
 // Loads all non-retired SensorRegistry records for a given hub and returns

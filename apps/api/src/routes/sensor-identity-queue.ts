@@ -18,8 +18,9 @@
 //   POST /api/v1/sensor-identity/review-queue/:id/resolve     resolve one item
 //
 // Resolution types implemented:
-//   "provision" — register_new items only (Step 3)
-//   "select_candidate" and "force_relink" — Steps 4 & 5, not yet implemented
+//   "provision"        — register_new items only (Step 3)
+//   "select_candidate" — needs_manual_review items (Step 4)
+//   "force_relink"     — hold_for_mac_conflict items (Step 5, not yet implemented)
 //
 // Auth: requireAuth + requireRole("queen", "worker") on all endpoints.
 
@@ -30,6 +31,7 @@ import { logger } from "../lib/logger";
 import { requireAuth, requireRole, AuthRequest } from "../middleware/auth";
 import {
   persistProvisionNew,
+  persistSelectCandidate,
   AssetIdConflictError,
   MacCollisionError,
 } from "../lib/sensor-registry-db";
@@ -177,6 +179,18 @@ const provisionBodySchema = z.object({
   hiveId:            z.string().uuid().nullable().optional().default(null),
   currentMacAddress: z.string().regex(MAC_RE, "must be a valid MAC address (XX:XX:XX:XX:XX:XX)")
                        .nullable().optional().default(null),
+});
+
+// POST /resolve — "select_candidate" body
+//
+// Minimal: the operator supplies only the registryId they are selecting.
+// All other context (observed MAC, deviceIdentifier, relinkRequired, previousMac)
+// is reconstructed from the queue item's stored payload — it was captured by
+// queueForReview() at observation time and is the authoritative source.
+const selectCandidateBodySchema = z.object({
+  resolution: z.literal("select_candidate"),
+  // UUID of the registry record the operator has chosen from the candidates list.
+  registryId: z.string().uuid(),
 });
 
 // ---------------------------------------------------------------------------
@@ -350,32 +364,50 @@ router.post(
 // POST /api/v1/sensor-identity/review-queue/:id/resolve
 // ---------------------------------------------------------------------------
 //
-// Resolves a pending queue item. Currently supports one resolution type:
+// Resolves a pending queue item. Supports two resolution types:
 //
-//   "provision" — only valid for register_new items. Creates a new SensorRegistry
-//                 row, a ProvisioningEvent audit record, and marks the queue item
-//                 processed — all in a single transaction.
+//   "provision"        — register_new items only. Creates a new SensorRegistry
+//                        row, ProvisioningEvent audit record, and seals the
+//                        queue item — all in a single transaction.
 //
-// Resolution types "select_candidate" (needs_manual_review) and "force_relink"
-// (hold_for_mac_conflict) are Steps 4 & 5 and are not yet implemented.
+//   "select_candidate" — needs_manual_review items only. Operator picks which
+//                        candidate registry record the observation belongs to.
+//                        Runs link_confirmed or relink_mac logic (determined
+//                        by reconciliation.relinkRequired stored in the payload)
+//                        and seals the queue item — all in a single transaction.
 //
-// Guard sequence (short-circuits early on failure):
-//   1. Validate :id is a UUID
-//   2. Check resolution type is "provision" — 400 otherwise (future types added here)
-//   3. Full Zod validation of the provision body
-//   4. assetId format check via isValidAssetId()
-//   5. Load and verify the queue item (exists, correct event type, not yet processed)
-//   6. Verify payload.action === 'register_new' — 409 if item is a different action type
-//   7. Delegate to persistProvisionNew() — runs the 5-step DB transaction
-//      Throws AssetIdConflictError → 409
-//      Throws MacCollisionError    → 409
-//      Unexpected error            → 500
+// "force_relink" (hold_for_mac_conflict) is Step 5 and is not yet implemented.
 //
-// Returns:
+// Guard sequence — provision:
+//   1. Validate :id UUID
+//   2. Pre-check resolution type — 400 if unsupported
+//   3. Zod validation of provision body
+//   4. assetId format check (isValidAssetId)
+//   5. Load queue item — 404 if missing/wrong type
+//   6. processedAt null check — 409 if already processed
+//   7. payload.action === 'register_new' — 409 otherwise
+//   8. persistProvisionNew() — 5-step transaction
+//      AssetIdConflictError → 409 | MacCollisionError → 409 | other → 500
+//
+// Guard sequence — select_candidate:
+//   1. Validate :id UUID
+//   2. Pre-check resolution type — 400 if unsupported
+//   3. Zod validation of select_candidate body
+//   4. Load queue item — 404 if missing/wrong type
+//   5. processedAt null check — 409 if already processed
+//   6. payload.action === 'needs_manual_review' — 409 otherwise
+//   7. body.registryId in payload.candidates — 409 if not a candidate
+//   8. persistSelectCandidate() — transaction (relinkRequired path or confirm path)
+//      MacCollisionError → 409 | other → 500
+//
+// Returns (provision):
 //   201  { ok, resolution, createdRegistryId, assetId, processedAt }
+// Returns (select_candidate):
+//   200  { ok, resolution, selectedRegistryId, relinkPerformed, processedAt }
+// Errors (both):
 //   400  invalid input or unsupported resolution type
 //   404  item not found or wrong event type
-//   409  already processed | assetId conflict | MAC conflict | wrong action type
+//   409  already processed | conflict | wrong action type | not a candidate
 //   500  unexpected error
 
 router.post(
@@ -392,127 +424,256 @@ router.post(
     // Pre-check resolution type before running the full Zod parse.
     // Keeps the error clear and makes it trivial to add new resolution types later.
     const resolutionType = req.body?.resolution;
-    if (resolutionType !== "provision") {
+    if (resolutionType !== "provision" && resolutionType !== "select_candidate") {
       return res.status(400).json({
         error:     "Unsupported or missing resolution type",
         received:  resolutionType ?? null,
-        supported: ["provision"],
+        supported: ["provision", "select_candidate"],
       });
     }
 
-    const parsed = provisionBodySchema.safeParse(req.body);
-    if (!parsed.success) {
+    // ── provision path ───────────────────────────────────────────────────────
+    if (resolutionType === "provision") {
+      const parsed = provisionBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({
+          error:   "Invalid input",
+          details: parsed.error.flatten(),
+        });
+      }
+
+      const body = parsed.data;
+
+      // assetId format validation — reject non-BK-XXX-NNNN strings immediately
+      // rather than letting them fall through to a DB error.
+      if (!isValidAssetId(body.assetId)) {
+        return res.status(400).json({ error: "assetId format is invalid" });
+      }
+
+      // Normalize MAC to uppercase so it is stored consistently with how the
+      // pipeline normalises MACs in normalizeObservation().
+      const normalizedMac =
+        body.currentMacAddress !== null
+          ? body.currentMacAddress.toUpperCase().trim()
+          : null;
+
+      // Load the queue item — confirm it exists, is the right type, and is pending.
+      const event = await db.domainEvent.findUnique({
+        where:  { id },
+        select: { id: true, eventType: true, processedAt: true, payload: true, aggregateId: true },
+      });
+
+      if (!event || event.eventType !== "sensor.identity.review_queued") {
+        return res.status(404).json({ error: "Queue item not found" });
+      }
+
+      if (event.processedAt !== null) {
+        return res.status(409).json({ error: "Queue item has already been processed" });
+      }
+
+      const queuePayload = toQueuePayload(event.payload);
+      if (queuePayload === null) {
+        // Should never happen for items written by queueForReview(), but guard anyway.
+        logger.error({ eventId: id }, "sensor-identity-queue: queue item has malformed payload");
+        return res.status(500).json({ error: "Queue item has malformed payload" });
+      }
+
+      // This resolution only applies to register_new items.
+      // needs_manual_review and hold_for_mac_conflict have different resolution paths.
+      if (queuePayload.action !== "register_new") {
+        return res.status(409).json({
+          error:        "resolution 'provision' only applies to register_new queue items",
+          actualAction: queuePayload.action,
+        });
+      }
+
+      // Spread existing payload for the transaction's payload-merge step.
+      const existingPayload: Record<string, unknown> =
+        event.payload !== null &&
+        typeof event.payload === "object" &&
+        !Array.isArray(event.payload)
+          ? (event.payload as Record<string, unknown>)
+          : {};
+
+      // deviceIdentifier is not in the request body — it comes from the original
+      // observation context captured by queueForReview(). Fall back to assetId
+      // when the hub reported no identifier (e.g. MAC-only observation).
+      const deviceIdentifier =
+        queuePayload.observation.deviceIdentifier ?? body.assetId;
+
+      try {
+        const newRegistryId = await persistProvisionNew({
+          assetId:              body.assetId,
+          deviceIdentifier,
+          name:                 body.name,
+          vendor:               body.vendor,
+          model:                body.model,
+          transport:            body.transport,
+          role:                 body.role,
+          hiveId:               body.hiveId ?? null,
+          hubId:                event.aggregateId,
+          currentMacAddress:    normalizedMac,
+          actorId:              req.user!.id,
+          queueItemId:          id,
+          existingQueuePayload: existingPayload,
+        });
+
+        logger.info(
+          { eventId: id, registryId: newRegistryId, assetId: body.assetId, actorId: req.user!.id },
+          "sensor-identity-queue: register_new resolved via provision",
+        );
+
+        return res.status(201).json({
+          ok:                true,
+          resolution:        "provision",
+          createdRegistryId: newRegistryId,
+          assetId:           body.assetId,
+          processedAt:       new Date().toISOString(),
+        });
+
+      } catch (err) {
+        if (err instanceof AssetIdConflictError) {
+          return res.status(409).json({
+            error:                 `assetId '${body.assetId}' is already in use`,
+            conflictingRegistryId: err.conflictingRegistryId,
+          });
+        }
+        if (err instanceof MacCollisionError) {
+          return res.status(409).json({
+            error:                 `MAC address '${normalizedMac}' is already in use`,
+            conflictingRegistryId: err.conflictingRegistryId,
+          });
+        }
+        logger.error(
+          { err: (err as Error).message, stack: (err as Error).stack, eventId: id },
+          "sensor-identity-queue: unexpected error during provision resolve",
+        );
+        return res.status(500).json({ error: "Internal server error" });
+      }
+    }
+
+    // ── select_candidate path ─────────────────────────────────────────────────
+    // resolutionType === "select_candidate" here — the pre-check above guarantees
+    // the value is one of ["provision", "select_candidate"] and the provision block
+    // always returns before reaching this point.
+
+    const parsedSC = selectCandidateBodySchema.safeParse(req.body);
+    if (!parsedSC.success) {
       return res.status(400).json({
         error:   "Invalid input",
-        details: parsed.error.flatten(),
+        details: parsedSC.error.flatten(),
       });
     }
 
-    const body = parsed.data;
-
-    // assetId format validation — reject non-BK-XXX-NNNN strings immediately
-    // rather than letting them fall through to a DB error.
-    if (!isValidAssetId(body.assetId)) {
-      return res.status(400).json({ error: "assetId format is invalid" });
-    }
-
-    // Normalize MAC to uppercase so it is stored consistently with how the
-    // pipeline normalises MACs in normalizeObservation().
-    const normalizedMac =
-      body.currentMacAddress !== null
-        ? body.currentMacAddress.toUpperCase().trim()
-        : null;
+    const scBody = parsedSC.data;
 
     // Load the queue item — confirm it exists, is the right type, and is pending.
-    const event = await db.domainEvent.findUnique({
+    const scEvent = await db.domainEvent.findUnique({
       where:  { id },
       select: { id: true, eventType: true, processedAt: true, payload: true, aggregateId: true },
     });
 
-    if (!event || event.eventType !== "sensor.identity.review_queued") {
+    if (!scEvent || scEvent.eventType !== "sensor.identity.review_queued") {
       return res.status(404).json({ error: "Queue item not found" });
     }
 
-    if (event.processedAt !== null) {
+    if (scEvent.processedAt !== null) {
       return res.status(409).json({ error: "Queue item has already been processed" });
     }
 
-    const queuePayload = toQueuePayload(event.payload);
-    if (queuePayload === null) {
-      // Should never happen for items written by queueForReview(), but guard anyway.
+    const scPayload = toQueuePayload(scEvent.payload);
+    if (scPayload === null) {
       logger.error({ eventId: id }, "sensor-identity-queue: queue item has malformed payload");
       return res.status(500).json({ error: "Queue item has malformed payload" });
     }
 
-    // This endpoint's "provision" resolution only applies to register_new items.
-    // needs_manual_review and hold_for_mac_conflict have different resolution paths.
-    if (queuePayload.action !== "register_new") {
+    // This resolution only applies to needs_manual_review items (ambiguous_match).
+    // register_new uses "provision"; hold_for_mac_conflict uses "force_relink".
+    if (scPayload.action !== "needs_manual_review") {
       return res.status(409).json({
-        error:        "resolution 'provision' only applies to register_new queue items",
-        actualAction: queuePayload.action,
+        error:        "resolution 'select_candidate' only applies to needs_manual_review queue items",
+        actualAction: scPayload.action,
       });
     }
 
-    // Spread existing payload for the transaction's payload-merge step.
-    const existingPayload: Record<string, unknown> =
-      event.payload !== null &&
-      typeof event.payload === "object" &&
-      !Array.isArray(event.payload)
-        ? (event.payload as Record<string, unknown>)
+    // Verify the supplied registryId is in the item's candidates list.
+    // The candidates are exactly the records the pipeline couldn't choose between.
+    // Selecting a registryId not in that set is an operator error — they may be
+    // targeting a device that was not part of this ambiguous observation at all.
+    const candidate = scPayload.candidates.find(c => c.id === scBody.registryId);
+    if (!candidate) {
+      return res.status(409).json({
+        error:      "registryId is not a candidate for this queue item",
+        registryId: scBody.registryId,
+      });
+    }
+
+    // Determine whether a MAC relink is required.
+    // All three conditions must hold:
+    //   - reconciliation flagged it (some identifier-tier matched but MAC differs)
+    //   - no cross-tier conflict (another record does not own the observed MAC)
+    //   - the observation actually carries a MAC to write
+    //
+    // For needs_manual_review (ambiguous_match) the domain guarantees
+    // crossTierConflict === false, but we read it from the stored payload
+    // rather than hard-coding so the logic stays correct if that ever changes.
+    const recon = scPayload.reconciliation;
+    const relinkRequired =
+      recon.relinkRequired &&
+      !recon.crossTierConflict &&
+      recon.observedMac !== null;
+
+    // Preserve existing payload for the transaction's spread-and-append step.
+    const scExistingPayload: Record<string, unknown> =
+      scEvent.payload !== null &&
+      typeof scEvent.payload === "object" &&
+      !Array.isArray(scEvent.payload)
+        ? (scEvent.payload as Record<string, unknown>)
         : {};
 
-    // deviceIdentifier is not in the request body — it comes from the original
-    // observation context captured by queueForReview(). Fall back to assetId
-    // when the hub reported no identifier (e.g. MAC-only observation).
-    const deviceIdentifier =
-      queuePayload.observation.deviceIdentifier ?? body.assetId;
-
     try {
-      const newRegistryId = await persistProvisionNew({
-        assetId:              body.assetId,
-        deviceIdentifier,
-        name:                 body.name,
-        vendor:               body.vendor,
-        model:                body.model,
-        transport:            body.transport,
-        role:                 body.role,
-        hiveId:               body.hiveId ?? null,
-        hubId:                event.aggregateId,      // hub that reported the original observation
-        currentMacAddress:    normalizedMac,
+      await persistSelectCandidate({
+        registryId:           scBody.registryId,
+        // Pass the raw observedMac — persistSelectCandidate guards on
+        // relinkRequired && observedMacAddress !== null internally.
+        observedMacAddress:   recon.observedMac,
+        deviceIdentifier:     scPayload.observation.deviceIdentifier,
+        previousMac:          recon.previousMac,
+        relinkRequired,
         actorId:              req.user!.id,
         queueItemId:          id,
-        existingQueuePayload: existingPayload,
+        hubId:                scEvent.aggregateId,
+        existingQueuePayload: scExistingPayload,
       });
 
       logger.info(
-        { eventId: id, registryId: newRegistryId, assetId: body.assetId, actorId: req.user!.id },
-        "sensor-identity-queue: register_new resolved via provision",
+        {
+          eventId:        id,
+          registryId:     scBody.registryId,
+          relinkRequired,
+          actorId:        req.user!.id,
+        },
+        "sensor-identity-queue: needs_manual_review resolved via select_candidate",
       );
 
-      return res.status(201).json({
-        ok:                true,
-        resolution:        "provision",
-        createdRegistryId: newRegistryId,
-        assetId:           body.assetId,
-        processedAt:       new Date().toISOString(),
+      return res.status(200).json({
+        ok:                 true,
+        resolution:         "select_candidate",
+        selectedRegistryId: scBody.registryId,
+        relinkPerformed:    relinkRequired,
+        processedAt:        new Date().toISOString(),
       });
 
     } catch (err) {
-      if (err instanceof AssetIdConflictError) {
-        return res.status(409).json({
-          error:                 `assetId '${body.assetId}' is already in use`,
-          conflictingRegistryId: err.conflictingRegistryId,
-        });
-      }
       if (err instanceof MacCollisionError) {
         return res.status(409).json({
-          error:                 `MAC address '${normalizedMac}' is already in use`,
+          error:                 `MAC address '${recon.observedMac}' is already in use`,
           conflictingRegistryId: err.conflictingRegistryId,
         });
       }
       logger.error(
         { err: (err as Error).message, stack: (err as Error).stack, eventId: id },
-        "sensor-identity-queue: unexpected error during provision resolve",
+        "sensor-identity-queue: unexpected error during select_candidate resolve",
       );
       return res.status(500).json({ error: "Internal server error" });
     }
