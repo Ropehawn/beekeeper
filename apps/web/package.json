@@ -5,8 +5,8 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "build": "esbuild src/pages/hardware-registry.ts src/pages/sensor-identity-queue.ts src/pages/node-health.ts --bundle --format=esm --outdir=public/dist/pages --platform=browser --target=es2022",
-    "build:watch": "esbuild src/pages/hardware-registry.ts src/pages/sensor-identity-queue.ts src/pages/node-health.ts --bundle --format=esm --outdir=public/dist/pages --platform=browser --target=es2022 --watch"
+    "build": "esbuild src/pages/hardware-registry.ts src/pages/sensor-identity-queue.ts src/pages/node-health.ts src/pages/hive-coverage.ts --bundle --format=esm --outdir=public/dist/pages --platform=browser --target=es2022",
+    "build:watch": "esbuild src/pages/hardware-registry.ts src/pages/sensor-identity-queue.ts src/pages/node-health.ts src/pages/hive-coverage.ts --bundle --format=esm --outdir=public/dist/pages --platform=browser --target=es2022 --watch"
   },
   "dependencies": {
     "express": "^4.21.0"

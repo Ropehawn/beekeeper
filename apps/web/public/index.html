@@ -619,6 +619,7 @@
       <div class="nav-item" id="nav-cameras-cfg" onclick="nav('admin-cameras')"><span class="icon">🎥</span> Cameras</div>
       <div class="nav-item" id="nav-sensor-queue" onclick="nav('sensor-queue')"><span class="icon">🔬</span> ID Queue</div>
       <div class="nav-item" id="nav-node-health" onclick="nav('node-health')"><span class="icon">📶</span> Node Health</div>
+      <div class="nav-item" id="nav-hive-coverage" onclick="nav('hive-coverage')"><span class="icon">🗺</span> Hive Coverage</div>
     </div>
   </div>
 
@@ -1546,6 +1547,18 @@
       <div id="node-health-container" style="padding:0 4px;"></div>
     </div>
 
+    <!-- ═══════════════════════════════════════ HIVE COVERAGE ══ -->
+    <div class="page" id="page-hive-coverage">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Hive Coverage</div>
+          <div class="page-subtitle">Sensing capabilities covered and missing per hive</div>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="loadHiveCoveragePage()">↻ Refresh</button>
+      </div>
+      <div id="hive-coverage-container" style="padding:0 4px;"></div>
+    </div>
+
     <!-- ═══════════════════════════════════════ DISCOVER DEVICES MODAL ══ -->
     <div class="modal-overlay" id="discover-overlay" style="display:none;">
       <div class="modal-box" style="width:580px;max-width:calc(100vw - 24px);">
@@ -2235,7 +2248,7 @@
 
     // Sidebar visibility
     const workerItems = ['nav-inspect','nav-feed','nav-health-event','nav-harvest','nav-tasks','nav-apiary'];
-    const queenItems = ['nav-financials','nav-users','nav-sensors-cfg','nav-cameras-cfg','nav-node-health'];
+    const queenItems = ['nav-financials','nav-users','nav-sensors-cfg','nav-cameras-cfg','nav-node-health','nav-hive-coverage'];
 
     workerItems.forEach(id => {
       const el = document.getElementById(id);
@@ -2315,7 +2328,7 @@
   function nav(page) {
     // Role guards
     if (currentRole === 'spectator' && ['inspect','feed','health-event','harvest','tasks','financials','admin-users','admin-sensors','admin-cameras','sensor-queue','node-health','apiary'].includes(page)) return;
-    if (currentRole !== 'queen' && ['financials','admin-users','admin-sensors','admin-cameras','sensor-queue','node-health'].includes(page)) return;
+    if (currentRole !== 'queen' && ['financials','admin-users','admin-sensors','admin-cameras','sensor-queue','node-health','hive-coverage'].includes(page)) return;
 
     // Inspection session lifecycle
     if (currentPage === 'inspect' && page !== 'inspect') {
@@ -2347,7 +2360,8 @@
       'admin-sensors': 'nav-sensors-cfg',
       'admin-cameras': 'nav-cameras-cfg',
       'sensor-queue':  'nav-sensor-queue',
-      'node-health':   'nav-node-health',
+      'node-health':    'nav-node-health',
+      'hive-coverage':  'nav-hive-coverage',
     };
     const navEl = pageNavMap[page] ? document.getElementById(pageNavMap[page]) : null;
     if (navEl) navEl.classList.add('active');
@@ -2393,6 +2407,7 @@
     if (page === 'sensor-queue')  { loadSensorIdentityQueuePage(); }
     if (page !== 'node-health')   { stopNodeHealthRefresh(); }
     if (page === 'node-health')   { loadNodeHealthPage(); }
+    if (page === 'hive-coverage') { loadHiveCoveragePage(); }
     // Set today's date on any date field that's empty when its page opens
     if (page === 'financials' || page === 'setup') {
       const today = todayLocalISO();
@@ -8346,6 +8361,16 @@
     import('/dist/pages/node-health.js')
       .then(mod => mod.stopNodeHealthRefresh())
       .catch(() => {/* module not yet loaded — nothing to stop */});
+  }
+
+  // ── Hive Coverage page ────────────────────────────────────────────────────
+  async function loadHiveCoveragePage() {
+    try {
+      const mod = await import('/dist/pages/hive-coverage.js');
+      await mod.loadHiveCoveragePage();
+    } catch (e) {
+      console.error('hive-coverage: failed to load', e);
+    }
   }
 
   // Refresh the Assigned Sensors table via the new registry lane.

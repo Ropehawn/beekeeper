@@ -27,6 +27,7 @@ import { hubsRouter } from "./routes/hubs";
 import { hubObserveRouter } from "./routes/hub-observe";
 import { sensorIdentityQueueRouter } from "./routes/sensor-identity-queue";
 import { nodeHealthRouter } from "./routes/node-health";
+import { hiveCoverageRouter } from "./routes/hive-coverage";
 import { camerasRouter } from "./routes/cameras";
 import { healthAnalysisRouter } from "./routes/health-analysis";
 import { getSchedulerStatus } from "./jobs/scheduler";
@@ -123,6 +124,7 @@ app.use("/api/v1/hubs", hubsRouter);
 app.use("/api/v1/hubs", hubObserveRouter);
 app.use("/api/v1/sensor-identity", sensorIdentityQueueRouter);
 app.use("/api/v1/hubs", nodeHealthRouter);
+app.use("/api/v1/hives", hiveCoverageRouter);
 app.use("/api/v1/cameras", camerasRouter);
 app.use("/api/v1/health-analysis", healthAnalysisRouter);
 
