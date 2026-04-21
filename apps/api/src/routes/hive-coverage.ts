@@ -49,7 +49,81 @@ function bucketsFor(profile: string | null): string[] {
   return PROFILE_BUCKETS[profile] ?? [];
 }
 
-// ── Route ─────────────────────────────────────────────────────────────────────
+// ── Shared query helper ───────────────────────────────────────────────────────
+
+async function fetchDevicesForHives(hiveIds: string[]) {
+  return db.sensorDevice.findMany({
+    where: { hiveId: { in: hiveIds }, isActive: true },
+    select: {
+      id:                true,
+      deviceId:          true,
+      name:              true,
+      hiveId:            true,
+      locationRole:      true,
+      deploymentProfile: true,
+    },
+  });
+}
+
+function buildCoverageItem(
+  hive: { id: string; name: string },
+  hiveDevices: Awaited<ReturnType<typeof fetchDevicesForHives>>,
+) {
+  const bucketDevices = new Map<string, typeof hiveDevices>();
+  for (const { key } of BUCKET_DEFS) bucketDevices.set(key, []);
+
+  for (const d of hiveDevices) {
+    for (const b of bucketsFor(d.deploymentProfile)) {
+      bucketDevices.get(b)?.push(d);
+    }
+  }
+
+  const deviceEntry = (d: typeof hiveDevices[number]) => ({
+    id:                d.id,
+    name:              d.name ?? d.deviceId,
+    deviceId:          d.deviceId,
+    locationRole:      d.locationRole      ?? null,
+    deploymentProfile: d.deploymentProfile ?? null,
+  });
+
+  const buckets = BUCKET_DEFS.map(({ key, label }) => {
+    const list = bucketDevices.get(key) ?? [];
+    return { key, label, covered: list.length > 0, devices: list.map(deviceEntry) };
+  });
+
+  return {
+    hiveId:              hive.id,
+    hiveName:            hive.name,
+    assignedCount:       hiveDevices.length,
+    withoutProfileCount: hiveDevices.filter(d => !d.deploymentProfile || d.deploymentProfile === "custom").length,
+    buckets,
+  };
+}
+
+// ── Routes ─────────────────────────────────────────────────────────────────────
+
+// GET /api/v1/hives/coverage/:hiveId — single-hive coverage (used by hive detail page)
+hiveCoverageRouter.get(
+  "/coverage/:hiveId",
+  requireAuth,
+  requireRole("queen", "worker"),
+  async (req, res) => {
+    try {
+      const { hiveId } = req.params;
+      const hive = await db.hive.findUnique({
+        where:  { id: hiveId },
+        select: { id: true, name: true, status: true },
+      });
+      if (!hive || hive.status !== "active") {
+        return res.status(404).json({ error: "Hive not found" });
+      }
+      const devices = await fetchDevicesForHives([hiveId]);
+      return res.json(buildCoverageItem(hive, devices));
+    } catch {
+      return res.status(500).json({ error: "Failed to load hive coverage" });
+    }
+  },
+);
 
 hiveCoverageRouter.get(
   "/coverage",
@@ -70,25 +144,12 @@ hiveCoverageRouter.get(
 
       const hiveIds = hives.map(h => h.id);
 
-      // ── 2. Load active sensor devices for these hives ───────────────────────
-      const devices = await db.sensorDevice.findMany({
-        where: {
-          hiveId:   { in: hiveIds },
-          isActive: true,
-        },
-        select: {
-          id:                true,
-          deviceId:          true,
-          name:              true,
-          hiveId:            true,
-          locationRole:      true,
-          deploymentProfile: true,
-        },
-      });
+      // ── 2. Load all active sensor devices for these hives ──────────────────
+      const allDevices = await fetchDevicesForHives(hiveIds);
 
-      // Index devices by hiveId for O(1) lookup
-      const devicesByHive = new Map<string, typeof devices>();
-      for (const d of devices) {
+      // Index by hiveId for O(1) lookup
+      const devicesByHive = new Map<string, typeof allDevices>();
+      for (const d of allDevices) {
         if (!d.hiveId) continue;
         if (!devicesByHive.has(d.hiveId)) devicesByHive.set(d.hiveId, []);
         devicesByHive.get(d.hiveId)!.push(d);
@@ -96,50 +157,8 @@ hiveCoverageRouter.get(
 
       // ── 3. Build coverage items ─────────────────────────────────────────────
       const items = hives.map(hive => {
-        const hiveDevices = devicesByHive.get(hive.id) ?? [];
-
-        // Per-bucket device accumulator (keyed by bucket key string)
-        const bucketDevices = new Map<string, typeof devices>();
-        for (const { key } of BUCKET_DEFS) bucketDevices.set(key, []);
-
-        for (const d of hiveDevices) {
-          for (const b of bucketsFor(d.deploymentProfile)) {
-            bucketDevices.get(b)?.push(d);
-          }
-        }
-
-        // Serialise device to clean shape
-        const deviceEntry = (d: typeof devices[number]) => ({
-          id:                d.id,
-          name:              d.name ?? d.deviceId,
-          deviceId:          d.deviceId,
-          locationRole:      d.locationRole      ?? null,
-          deploymentProfile: d.deploymentProfile ?? null,
-        });
-
-        // Build the ordered buckets array — labels come from BUCKET_DEFS, not the client
-        const buckets = BUCKET_DEFS.map(({ key, label }) => {
-          const list = bucketDevices.get(key) ?? [];
-          return {
-            key,
-            label,
-            covered: list.length > 0,
-            devices: list.map(deviceEntry),
-          };
-        });
-
-        const missingCount       = buckets.filter(b => !b.covered).length;
-        const assignedCount      = hiveDevices.length;
-        const withoutProfileCount = hiveDevices.filter(d => !d.deploymentProfile || d.deploymentProfile === "custom").length;
-
-        return {
-          hiveId:              hive.id,
-          hiveName:            hive.name,
-          assignedCount,
-          withoutProfileCount,
-          buckets,
-          _missingCount: missingCount,
-        };
+        const item = buildCoverageItem(hive, devicesByHive.get(hive.id) ?? []);
+        return { ...item, _missingCount: item.buckets.filter(b => !b.covered).length };
       });
 
       // ── 4. Sort worst-first (most missing buckets), then alpha by name ──────

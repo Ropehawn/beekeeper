@@ -408,6 +408,14 @@ const BeeAPI = (() => {
     return request('GET', '/api/v1/hive-summary');
   }
 
+  // GET /api/v1/hives/coverage/:hiveId
+  // Returns sensor coverage for a single hive:
+  // { hiveId, hiveName, assignedCount, withoutProfileCount,
+  //   buckets: [{ key, label, covered, devices: [{ id, name, deviceId, locationRole, deploymentProfile }] }] }
+  async function getHiveCoverage(hiveId) {
+    return request('GET', `/api/v1/hives/coverage/${encodeURIComponent(hiveId)}`);
+  }
+
   // ── Public API ────────────────────────────────────────────
   return {
     request, // exposed for ad-hoc API calls
@@ -435,5 +443,6 @@ const BeeAPI = (() => {
     getHiveScore,
     getHiveHealthAnalysis,
     getHiveSummary,
+    getHiveCoverage,
   };
 })();

@@ -3471,7 +3471,7 @@
     const realHiveId = _realHiveIds[id];
     if (realHiveId && BeeAPI.isLoggedIn()) {
       try {
-        const [inspections, feedings, varroaCounts, treatmentLogs, hiveAlerts, hiveScore, sensorData] = await Promise.all([
+        const [inspections, feedings, varroaCounts, treatmentLogs, hiveAlerts, hiveScore, sensorData, coverageData] = await Promise.all([
           BeeAPI.getInspections(realHiveId).catch(() => []),
           BeeAPI.getFeedingLogs(realHiveId).catch(() => []),
           BeeAPI.getVarroaCounts(realHiveId, 10).catch(() => []),
@@ -3479,6 +3479,7 @@
           BeeAPI.getHiveAlerts(realHiveId).catch(() => []),
           BeeAPI.getHiveScore(realHiveId).catch(() => null),
           BeeAPI.getLatestSensorReading(realHiveId).catch(() => null),
+          BeeAPI.getHiveCoverage(realHiveId).catch(() => null),
         ]);
 
         // ── Replace inspections with real data ──
@@ -3726,6 +3727,11 @@
           };
         }
 
+        // ── Apply sensor coverage ──
+        // buckets array + assignedCount + withoutProfileCount from the server.
+        // null when the request failed — renderer shows a fallback.
+        h.sensorCoverage = coverageData || null;
+
       } catch (e) {
         console.warn('Failed to load hive detail data:', e.message);
       }
@@ -3756,6 +3762,83 @@
           <button onclick="switchHiveDetail(${id})" style="background:#f59e0b;color:#1a1a1a;border:none;padding:8px 18px;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">↺ Retry</button>
         </div>`;
     }
+  }
+
+  // ── Sensor Coverage card ────────────────────────────────────────────────────
+  // Renders a compact bucket-coverage card for the hive detail page.
+  // cov is the response from GET /api/v1/hives/coverage/:hiveId, or null on failure.
+  // All labels and bucket keys come from cov.buckets — nothing is hardcoded here.
+  function renderSensorCoverageCard(cov) {
+    if (!cov) {
+      return `
+        <div class="card">
+          <div class="card-title">📡 Sensor Coverage</div>
+          <div style="font-size:11px;color:#aaa;font-style:italic;padding:6px 0;">
+            Coverage data unavailable
+          </div>
+        </div>`;
+    }
+
+    const coveredCount = cov.buckets.filter(b => b.covered).length;
+    const totalCount   = cov.buckets.length;
+    const allGood      = coveredCount === totalCount;
+    const statusColor  = allGood ? '#22c55e' : coveredCount === 0 ? '#ef4444' : '#f59e0b';
+    const statusLabel  = allGood
+      ? `All ${totalCount} covered`
+      : `${coveredCount} / ${totalCount} covered`;
+
+    const rows = cov.buckets.map(b => {
+      const indicator = b.covered
+        ? `<span style="color:#22c55e;font-size:11px;font-weight:700;width:44px;flex-shrink:0;">✓ Yes</span>`
+        : `<span style="color:#ef4444;font-size:11px;font-weight:700;width:44px;flex-shrink:0;">✗ No</span>`;
+
+      let detail;
+      if (b.covered) {
+        detail = b.devices.map(d => {
+          const name = d.name || d.deviceId;
+          const id   = (d.name && d.deviceId && d.name !== d.deviceId)
+            ? ` <span style="color:#94a3b8;font-family:monospace;font-size:10px;">(${d.deviceId})</span>`
+            : '';
+          const role = d.locationRole
+            ? ` <span style="color:#64748b;font-size:10px;">· ${d.locationRole}</span>`
+            : '';
+          return `<span style="color:#cbd5e1;">${name}</span>${id}${role}`;
+        }).join('<span style="color:#334155;margin:0 3px;">·</span>');
+      } else {
+        detail = `<span style="color:#475569;font-size:11px;font-style:italic;">No sensor assigned</span>`;
+      }
+
+      return `
+        <div style="display:flex;align-items:baseline;gap:8px;padding:4px 0;border-bottom:1px solid #f0f0f0;">
+          <span style="font-size:11px;color:#888;width:110px;flex-shrink:0;">${b.label}</span>
+          ${indicator}
+          <span style="flex:1;min-width:0;font-size:11px;line-height:1.4;">${detail}</span>
+        </div>`;
+    }).join('');
+
+    let hint = '';
+    if (!allGood && cov.assignedCount === 0) {
+      hint = `<div style="font-size:10px;color:#888;margin-top:8px;font-style:italic;">
+        No sensors assigned to this hive yet.
+      </div>`;
+    } else if (!allGood && cov.withoutProfileCount > 0) {
+      const noun   = cov.withoutProfileCount === 1 ? 'sensor' : 'sensors';
+      const plural  = cov.withoutProfileCount === 1 ? 'has' : 'have';
+      hint = `<div style="font-size:10px;color:#d97706;margin-top:8px;">
+        ⚠ ${cov.withoutProfileCount} ${noun} ${plural} no deployment profile —
+        <span style="cursor:pointer;text-decoration:underline;" onclick="nav('node-health')">open Node Health</span> to assign.
+      </div>`;
+    }
+
+    return `
+      <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+          <div class="card-title" style="margin:0;">📡 Sensor Coverage</div>
+          <span style="font-size:11px;font-weight:600;color:${statusColor};">${statusLabel}</span>
+        </div>
+        <div>${rows}</div>
+        ${hint}
+      </div>`;
   }
 
   let _lastHiveDetail = null; // stored for modal builders
@@ -3840,14 +3923,8 @@
             </div>
           </div>
 
-          <!-- 24h Sensor Chart — N/A until sensors connected -->
-          <div class="card">
-            <div class="card-title">Temp & Humidity · 24h</div>
-            <div style="background:#f8f8f8;border:1px dashed #d1d5db;border-radius:8px;padding:20px;text-align:center;">
-              <div style="font-size:11px;font-weight:600;color:#aaa;">No sensor data available</div>
-              <div style="font-size:10px;color:#bbb;margin-top:4px;">Chart will populate when UniFi sensors are connected</div>
-            </div>
-          </div>
+          <!-- Sensor Coverage — bucket-level view driven by deploymentProfile data -->
+          ${renderSensorCoverageCard(h.sensorCoverage || null)}
         </div>
 
         <div style="display:flex;flex-direction:column;gap:12px;">
