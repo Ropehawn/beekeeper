@@ -618,6 +618,7 @@
       <div class="nav-item" id="nav-sensors-cfg" onclick="nav('admin-sensors')"><span class="icon">📡</span> Sensors</div>
       <div class="nav-item" id="nav-cameras-cfg" onclick="nav('admin-cameras')"><span class="icon">🎥</span> Cameras</div>
       <div class="nav-item" id="nav-sensor-queue" onclick="nav('sensor-queue')"><span class="icon">🔬</span> ID Queue</div>
+      <div class="nav-item" id="nav-node-health" onclick="nav('node-health')"><span class="icon">📶</span> Node Health</div>
     </div>
   </div>
 
@@ -1534,6 +1535,17 @@
       <div id="sensor-queue-container"></div>
     </div>
 
+    <!-- ═══════════════════════════════════════ NODE HEALTH ══ -->
+    <div class="page" id="page-node-health">
+      <div class="page-header">
+        <div>
+          <div class="page-title">Node Health</div>
+          <div class="page-subtitle">Live snapshot of all sensor nodes seen in the last 24 hours</div>
+        </div>
+      </div>
+      <div id="node-health-container" style="padding:0 4px;"></div>
+    </div>
+
     <!-- ═══════════════════════════════════════ DISCOVER DEVICES MODAL ══ -->
     <div class="modal-overlay" id="discover-overlay" style="display:none;">
       <div class="modal-box" style="width:580px;max-width:calc(100vw - 24px);">
@@ -2040,7 +2052,7 @@
 
     // Sidebar visibility
     const workerItems = ['nav-inspect','nav-feed','nav-health-event','nav-harvest','nav-tasks','nav-apiary'];
-    const queenItems = ['nav-financials','nav-users','nav-sensors-cfg','nav-cameras-cfg'];
+    const queenItems = ['nav-financials','nav-users','nav-sensors-cfg','nav-cameras-cfg','nav-node-health'];
 
     workerItems.forEach(id => {
       const el = document.getElementById(id);
@@ -2095,10 +2107,10 @@
     if (isSpectator && specCams) loadSpectatorCameras();
 
     // If spectator tries to navigate to restricted page, redirect
-    if (isSpectator && ['inspect','feed','tasks','financials','admin-users','admin-sensors','admin-cameras','sensor-queue','apiary'].includes(currentPage)) {
+    if (isSpectator && ['inspect','feed','tasks','financials','admin-users','admin-sensors','admin-cameras','sensor-queue','node-health','apiary'].includes(currentPage)) {
       nav('dashboard');
     }
-    if (!isQueen && ['financials','admin-users','admin-sensors','admin-cameras','sensor-queue'].includes(currentPage)) {
+    if (!isQueen && ['financials','admin-users','admin-sensors','admin-cameras','sensor-queue','node-health'].includes(currentPage)) {
       nav('dashboard');
     }
   }
@@ -2119,8 +2131,8 @@
 
   function nav(page) {
     // Role guards
-    if (currentRole === 'spectator' && ['inspect','feed','health-event','harvest','tasks','financials','admin-users','admin-sensors','admin-cameras','sensor-queue','apiary'].includes(page)) return;
-    if (currentRole !== 'queen' && ['financials','admin-users','admin-sensors','admin-cameras','sensor-queue'].includes(page)) return;
+    if (currentRole === 'spectator' && ['inspect','feed','health-event','harvest','tasks','financials','admin-users','admin-sensors','admin-cameras','sensor-queue','node-health','apiary'].includes(page)) return;
+    if (currentRole !== 'queen' && ['financials','admin-users','admin-sensors','admin-cameras','sensor-queue','node-health'].includes(page)) return;
 
     // Inspection session lifecycle
     if (currentPage === 'inspect' && page !== 'inspect') {
@@ -2152,6 +2164,7 @@
       'admin-sensors': 'nav-sensors-cfg',
       'admin-cameras': 'nav-cameras-cfg',
       'sensor-queue':  'nav-sensor-queue',
+      'node-health':   'nav-node-health',
     };
     const navEl = pageNavMap[page] ? document.getElementById(pageNavMap[page]) : null;
     if (navEl) navEl.classList.add('active');
@@ -2195,6 +2208,8 @@
     if (page === 'harvest') { autoFillDate('harv-date'); loadHarvestLogs(); }
     if (page === 'admin-sensors') { refreshSensorsTableFromRegistry(); }
     if (page === 'sensor-queue')  { loadSensorIdentityQueuePage(); }
+    if (page !== 'node-health')   { stopNodeHealthRefresh(); }
+    if (page === 'node-health')   { loadNodeHealthPage(); }
     // Set today's date on any date field that's empty when its page opens
     if (page === 'financials' || page === 'setup') {
       const today = todayLocalISO();
@@ -8123,6 +8138,22 @@
     } catch (e) {
       console.error('sensor-identity-queue: failed to refresh', e);
     }
+  }
+
+  // ── Node Health page ──────────────────────────────────────────────────────
+  async function loadNodeHealthPage() {
+    try {
+      const mod = await import('/dist/pages/node-health.js');
+      await mod.loadNodeHealthPage();
+    } catch (e) {
+      console.error('node-health: failed to load', e);
+    }
+  }
+
+  function stopNodeHealthRefresh() {
+    import('/dist/pages/node-health.js')
+      .then(mod => mod.stopNodeHealthRefresh())
+      .catch(() => {/* module not yet loaded — nothing to stop */});
   }
 
   // Refresh the Assigned Sensors table via the new registry lane.
