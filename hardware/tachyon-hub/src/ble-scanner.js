@@ -89,6 +89,10 @@ class BLEScanner {
         case "tachyon_ble_s05t":
           readings = this._parseS05T(dev, manu, rssi, now);
           break;
+        case "beekeeper_c6":
+        case "tachyon_ble_beekeeper_c6":
+          readings = this._parseBeeKeeperC6(dev, manu, rssi, now);
+          break;
         default:
           readings = this._parseGeneric(dev, manu, rssi, now);
       }
@@ -200,6 +204,216 @@ class BLEScanner {
     return [
       { ...base, metric: "rssi_dbm", value: rssi, unit: "dBm" },
     ];
+  }
+
+  // BeeKeeper custom ESP32-C6 node.
+  // See hardware/esp32-c6-node/README.md for canonical format.
+  //
+  // Manufacturer Specific Data (AD type 0xFF), payload length depends on
+  // protocol version:
+  //   - v0x02: 20 bytes (BME280 + HX711)
+  //   - v0x03: 22 bytes (v0x02 + INMP441 RMS/peak)
+  //   - v0x04: 26 bytes (v0x03 + 4 FFT bands)
+  //
+  // Common layout (bytes 0–20 identical across v0x03+):
+  //   Bytes 0-1:   Company ID 0xFFFF (R&D) little-endian
+  //   Bytes 2-3:   Signature "BK" (0x42 0x4B)
+  //   Byte  4:     Protocol version
+  //   Byte  5:     Node type (0x01=BME, 0x02=BME+HX711, 0x03=full)
+  //   Bytes 6-7:   temperature ×100 °C (int16 LE) — 0x7FFF invalid
+  //   Bytes 8-9:   humidity ×100 %RH   (uint16 LE) — 0xFFFF invalid
+  //   Bytes 10-12: pressure Pa         (uint24 LE) — 0xFFFFFF invalid
+  //   Bytes 13-16: weight grams (int32 LE) — 0x7FFFFFFF invalid
+  //                If b2 of flags=0 (not calibrated), grams field contains
+  //                raw HX711 counts for hub-side back-calibration.
+  //   Byte  17:    battery % (0xFF = USB/unknown)
+  //   Byte  18:    flags — b0=BME present, b1=HX711 present,
+  //                        b2=HX711 calibrated, b3=first-boot,
+  //                        b4=mic present (v0x03+ only)
+  //
+  // v0x02 only:
+  //   Byte  19:    reserved
+  //
+  // v0x03+ only:
+  //   Byte  19:    audio RMS magnitude  (0=full scale, 127=silent, 0xFF invalid)
+  //   Byte  20:    audio peak magnitude (same encoding)
+  //
+  // v0x04+ only:
+  //   Byte  21:    FFT band low     (100–200 Hz)    — 0xFF invalid
+  //   Byte  22:    FFT band mid-low (200–400 Hz, queen piping fundamental)
+  //   Byte  23:    FFT band mid-high (400–800 Hz)
+  //   Byte  24:    FFT band high    (800–2000 Hz)
+  //   Byte  25:    reserved
+
+  static BEEKEEPER_COMPANY_ID = 0xFFFF;
+  static BEEKEEPER_SIG_0 = 0x42; // 'B'
+  static BEEKEEPER_SIG_1 = 0x4B; // 'K'
+
+  _parseBeeKeeperC6(dev, manu, rssi, now) {
+    const base = {
+      deviceMac: dev.mac,
+      hiveId: dev.hiveId ?? undefined,
+      vendor: "tachyon_ble_beekeeper_c6",
+      recordedAt: now,
+      signalRssi: rssi,
+      rawPayload: { raw: manu?.toString("hex") },
+    };
+
+    if (!manu || manu.length < 20) {
+      this.logger.warn({ msg: "ble.bkc6.short_payload", mac: dev.mac, len: manu?.length });
+      return [{ ...base, metric: "rssi_dbm", value: rssi, unit: "dBm" }];
+    }
+
+    // Locate our 4-byte signature: company ID 0xFFFF + "BK"
+    // noble on Linux: manufacturerData may or may not include company ID prefix.
+    // Search for the signature with a sliding window. Minimum payload is 20 bytes
+    // (v0x02); newer versions may be larger (v0x03 = 22 bytes).
+    const minLen = 20;
+    let off = -1;
+    for (let i = 0; i <= manu.length - minLen; i++) {
+      if (manu[i] === 0xFF && manu[i + 1] === 0xFF &&
+          manu[i + 2] === BLEScanner.BEEKEEPER_SIG_0 &&
+          manu[i + 3] === BLEScanner.BEEKEEPER_SIG_1) {
+        off = i;
+        break;
+      }
+      // Also allow payload without the company ID prefix (noble sometimes strips it)
+      if (i === 0 && manu[0] === BLEScanner.BEEKEEPER_SIG_0 &&
+          manu[1] === BLEScanner.BEEKEEPER_SIG_1) {
+        off = -2;  // synthetic: treat bytes as starting at "BK" directly
+        break;
+      }
+    }
+
+    let p;
+    if (off === -2) {
+      // Prepend synthetic company ID so offsets below line up.
+      p = Buffer.concat([Buffer.from([0xFF, 0xFF]), manu]);
+      off = 0;
+    } else if (off === -1) {
+      this.logger.warn({ msg: "ble.bkc6.no_signature", mac: dev.mac, raw: manu.toString("hex") });
+      return [{ ...base, metric: "rssi_dbm", value: rssi, unit: "dBm" }];
+    } else {
+      p = manu;
+    }
+
+    const protoVer  = p[off + 4];
+    const nodeType  = p[off + 5];
+    const tempRaw   = p.readInt16LE(off + 6);
+    const humRaw    = p.readUInt16LE(off + 8);
+    const pressRaw  = p[off + 10] | (p[off + 11] << 8) | (p[off + 12] << 16);
+    const weightRaw = p.readInt32LE(off + 13);
+    const battery   = p[off + 17];
+    const flags     = p[off + 18];
+
+    const bmePresent   = (flags & 0x01) !== 0;
+    const hxPresent    = (flags & 0x02) !== 0;
+    const hxCalibrated = (flags & 0x04) !== 0;
+    const firstBoot    = (flags & 0x08) !== 0;
+    const micPresent   = (flags & 0x10) !== 0;
+
+    // v0x03+ carries 2 audio bytes (RMS, peak) after the flags byte.
+    let audioRmsMag  = null;
+    let audioPeakMag = null;
+    if (protoVer >= 0x03 && p.length >= off + 21) {
+      const r = p[off + 19];
+      const k = p[off + 20];
+      if (r !== 0xFF) audioRmsMag  = r;  // magnitude in dB below full scale
+      if (k !== 0xFF) audioPeakMag = k;
+    }
+
+    // v0x04+ adds 4 FFT band bytes (bins 21–24).
+    let audioBands = null;
+    if (protoVer >= 0x04 && p.length >= off + 25) {
+      audioBands = {
+        low:      p[off + 21] === 0xFF ? null : p[off + 21],  // 100-200 Hz
+        midLow:   p[off + 22] === 0xFF ? null : p[off + 22],  // 200-400 Hz
+        midHigh:  p[off + 23] === 0xFF ? null : p[off + 23],  // 400-800 Hz
+        high:     p[off + 24] === 0xFF ? null : p[off + 24],  // 800-2000 Hz
+      };
+    }
+
+    const readings = [];
+    base.rawPayload.protoVer = protoVer;
+    base.rawPayload.nodeType = nodeType;
+    base.rawPayload.flags = { bmePresent, hxPresent, hxCalibrated, firstBoot, micPresent };
+
+    if (bmePresent) {
+      if (tempRaw !== 0x7FFF) {
+        readings.push({ ...base, metric: "temperature_c", value: tempRaw / 100, unit: "°C" });
+      }
+      if (humRaw !== 0xFFFF) {
+        readings.push({ ...base, metric: "humidity_pct", value: humRaw / 100, unit: "%" });
+      }
+      if (pressRaw !== 0xFFFFFF) {
+        readings.push({ ...base, metric: "pressure_pa", value: pressRaw, unit: "Pa" });
+      }
+    }
+
+    if (hxPresent && weightRaw !== 0x7FFFFFFF) {
+      if (hxCalibrated) {
+        readings.push({ ...base, metric: "weight_g", value: weightRaw, unit: "g" });
+      } else {
+        // Pre-calibration: expose raw counts so operator can calibrate from server
+        readings.push({ ...base, metric: "hx711_raw_counts", value: weightRaw, unit: "counts" });
+      }
+    }
+
+    if (battery !== 0xFF) {
+      readings.push({ ...base, metric: "battery_pct", value: battery, unit: "%" });
+    }
+
+    if (micPresent) {
+      if (audioRmsMag !== null) {
+        // Stored as positive magnitude (0 = full scale). Convert back to dBFS
+        // (always ≤ 0).
+        readings.push({
+          ...base, metric: "audio_rms_dbfs", value: -audioRmsMag, unit: "dBFS",
+        });
+      }
+      if (audioPeakMag !== null) {
+        readings.push({
+          ...base, metric: "audio_peak_dbfs", value: -audioPeakMag, unit: "dBFS",
+        });
+      }
+      if (audioBands) {
+        if (audioBands.low !== null) {
+          readings.push({ ...base, metric: "audio_band_low_dbfs",
+            value: -audioBands.low, unit: "dBFS", frequencyRangeHz: "100-200" });
+        }
+        if (audioBands.midLow !== null) {
+          readings.push({ ...base, metric: "audio_band_midlow_dbfs",
+            value: -audioBands.midLow, unit: "dBFS", frequencyRangeHz: "200-400" });
+        }
+        if (audioBands.midHigh !== null) {
+          readings.push({ ...base, metric: "audio_band_midhigh_dbfs",
+            value: -audioBands.midHigh, unit: "dBFS", frequencyRangeHz: "400-800" });
+        }
+        if (audioBands.high !== null) {
+          readings.push({ ...base, metric: "audio_band_high_dbfs",
+            value: -audioBands.high, unit: "dBFS", frequencyRangeHz: "800-2000" });
+        }
+      }
+    }
+
+    readings.push({ ...base, metric: "rssi_dbm", value: rssi, unit: "dBm" });
+
+    this.logger.debug({
+      msg: "ble.bkc6.parsed", mac: dev.mac,
+      protoVer, nodeType, tempC: tempRaw / 100, humPct: humRaw / 100,
+      pressurePa: pressRaw, weightG: weightRaw,
+      audioRmsDbfs: audioRmsMag !== null ? -audioRmsMag : null,
+      audioPeakDbfs: audioPeakMag !== null ? -audioPeakMag : null,
+      audioBands: audioBands ? {
+        low:     audioBands.low     !== null ? -audioBands.low     : null,
+        midLow:  audioBands.midLow  !== null ? -audioBands.midLow  : null,
+        midHigh: audioBands.midHigh !== null ? -audioBands.midHigh : null,
+        high:    audioBands.high    !== null ? -audioBands.high    : null,
+      } : null,
+      battery, bmePresent, hxPresent, hxCalibrated, firstBoot, micPresent,
+    });
+
+    return readings;
   }
 
   _parseGeneric(dev, manu, rssi, now) {
