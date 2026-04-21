@@ -94,10 +94,18 @@ function renderCard(item: NodeHealthItem): string {
   if (item.hx)  badges.push(badge('HX711'));
   if (item.mic) badges.push(badge('MIC'));
 
-  const rssiStr = item.signalRssi != null ? `${item.signalRssi}\u202fdBm` : '—';
-  const hasBody = rows.length > 0 || badges.length > 0;
+  const rssiStr  = item.signalRssi != null ? `${item.signalRssi}\u202fdBm` : '—';
+  const hasBody  = rows.length > 0 || badges.length > 0;
 
-  // ── Edit button (only when a sensor_devices row is linked) ──────────────
+  const qrLine = item.sensorQrId
+    ? `<div style="font-size:10px;font-family:monospace;color:#475569;margin-bottom:4px;padding-left:16px;">ID:\u202f${escAttr(item.sensorQrId)}</div>`
+    : `<div style="font-size:10px;font-family:monospace;color:#64402a;margin-bottom:4px;padding-left:16px;">unregistered</div>`;
+
+  // ── Edit / Register button ───────────────────────────────────────────────
+  const btnStyle =
+    `font-size:10px;font-weight:600;cursor:pointer;flex-shrink:0;` +
+    `padding:1px 6px;border:1px solid #334155;border-radius:3px;background:#0f172a;line-height:16px;`;
+
   const editBtn = item.sensorDeviceId
     ? `<button onclick="openNodeEditModal(this)" ` +
         `data-device-id="${escAttr(item.sensorDeviceId)}" ` +
@@ -106,10 +114,11 @@ function renderCard(item: NodeHealthItem): string {
         `data-hive-id="${escAttr(item.hiveId ?? '')}" ` +
         `data-loc-role="${escAttr(item.locationRole ?? '')}" ` +
         `data-loc-note="${escAttr(item.locationNote ?? '')}" ` +
-        `style="font-size:10px;font-weight:600;color:#64748b;cursor:pointer;flex-shrink:0;` +
-        `padding:1px 6px;border:1px solid #334155;border-radius:3px;background:#0f172a;` +
-        `line-height:16px;">✎ Edit</button>`
-    : '';
+        `style="${btnStyle}color:#64748b;">✎ Edit</button>`
+    : `<button onclick="openNodeRegisterModal(this)" ` +
+        `data-mac="${escAttr(item.deviceMac)}" ` +
+        `data-vendor="${escAttr(item.vendor)}" ` +
+        `style="${btnStyle}color:#f59e0b;">+ Register</button>`;
 
   return `
     <div style="background:#1e293b;border:1px solid ${color};border-radius:8px;` +
@@ -125,10 +134,7 @@ function renderCard(item: NodeHealthItem): string {
       </div>
 
       <!-- QR / sensor ID -->
-      ${item.sensorQrId
-        ? `<div style="font-size:10px;color:#475569;font-family:monospace;` +
-            `margin-bottom:4px;padding-left:16px;">ID: ${escAttr(item.sensorQrId)}</div>`
-        : ''}
+      ${qrLine}
 
       <!-- Hive context line -->
       <div style="font-size:12px;color:${contextColor};margin-bottom:${item.locationNote ? '2px' : '6px'};` +

@@ -1620,6 +1620,60 @@
       </div>
     </div>
 
+    <!-- ═══════════════════════════════════════ NODE REGISTER MODAL ══ -->
+    <div class="modal-overlay" id="node-register-overlay" style="display:none;">
+      <div class="modal-box">
+        <div class="modal-title" id="node-register-title">Register Sensor</div>
+        <div class="modal-sub" id="node-register-sub">Assign an ID and hive to this device</div>
+        <input type="hidden" id="node-register-mac">
+        <input type="hidden" id="node-register-vendor">
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div class="form-field">
+            <label class="form-label">Sensor ID / QR Code <span style="color:#ef4444;">*</span></label>
+            <input class="form-input" id="node-register-device-id" type="text"
+              placeholder="e.g. T7K2M or C6-001" style="font-family:monospace;font-size:12px;">
+            <div style="font-size:11px;color:#64748b;margin-top:3px;">
+              Enter the ID printed on the device label, or assign a new one.</div>
+          </div>
+          <div class="form-field">
+            <label class="form-label">Friendly Name <span style="color:#ef4444;">*</span></label>
+            <input class="form-input" id="node-register-name" type="text"
+              placeholder="e.g. Hive 3 Weight Scale">
+          </div>
+          <div class="form-field">
+            <label class="form-label">Assign to Hive</label>
+            <select class="form-input" id="node-register-hive-select"></select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">Location Role</label>
+            <select class="form-input" id="node-register-location-role">
+              <option value="">— unset —</option>
+              <option value="apiary_ambient">Apiary Ambient</option>
+              <option value="hive_exterior">Hive Exterior</option>
+              <option value="entrance">Entrance</option>
+              <option value="inner_cover">Inner Cover</option>
+              <option value="brood_box_upper">Brood Box Upper</option>
+              <option value="brood_box_lower">Brood Box Lower</option>
+              <option value="honey_super">Honey Super</option>
+              <option value="base_scale">Base Scale</option>
+              <option value="under_hive">Under Hive</option>
+              <option value="audio_probe">Audio Probe</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label class="form-label">Location Note <span style="color:#64748b;font-weight:400;">(optional)</span></label>
+            <input class="form-input" id="node-register-location-note" type="text"
+              placeholder="e.g. Under hive 3, left side">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeNodeRegisterModal()">Cancel</button>
+          <button class="btn btn-primary" onclick="saveNodeRegister()">Register</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══════════════════════════════════════ NODE EDIT MODAL ══ -->
     <div class="modal-overlay" id="node-edit-overlay" style="display:none;">
       <div class="modal-box">
@@ -8390,9 +8444,67 @@
     </td></tr>`;
   }
 
-  function closeDiscoverModal() { document.getElementById('discover-overlay').style.display = 'none'; }
-  function closeAssignModal()   { document.getElementById('assign-overlay').style.display = 'none'; }
-  function closeNodeEditModal() { document.getElementById('node-edit-overlay').style.display = 'none'; }
+  function closeDiscoverModal()     { document.getElementById('discover-overlay').style.display = 'none'; }
+  function closeAssignModal()       { document.getElementById('assign-overlay').style.display = 'none'; }
+  function closeNodeEditModal()     { document.getElementById('node-edit-overlay').style.display = 'none'; }
+  function closeNodeRegisterModal() { document.getElementById('node-register-overlay').style.display = 'none'; }
+
+  function openNodeRegisterModal(btn) {
+    const mac    = btn.dataset.mac;
+    const vendor = btn.dataset.vendor || 'generic';
+    document.getElementById('node-register-mac').value              = mac;
+    document.getElementById('node-register-vendor').value           = vendor;
+    document.getElementById('node-register-device-id').value        = '';
+    document.getElementById('node-register-name').value             = '';
+    document.getElementById('node-register-hive-select').innerHTML  = hiveOptsForAssign();
+    document.getElementById('node-register-location-role').value    = '';
+    document.getElementById('node-register-location-note').value    = '';
+    document.getElementById('node-register-title').textContent      = 'Register Sensor';
+    document.getElementById('node-register-sub').textContent        = mac + ' · ' + vendor;
+    document.getElementById('node-register-overlay').style.display  = 'flex';
+    setTimeout(() => document.getElementById('node-register-device-id').focus(), 50);
+  }
+
+  async function saveNodeRegister() {
+    const mac          = document.getElementById('node-register-mac').value;
+    const vendor       = document.getElementById('node-register-vendor').value;
+    const deviceId     = document.getElementById('node-register-device-id').value.trim();
+    const name         = document.getElementById('node-register-name').value.trim();
+    const hiveId       = document.getElementById('node-register-hive-select').value || null;
+    const locationRole = document.getElementById('node-register-location-role').value || null;
+    const locationNote = (document.getElementById('node-register-location-note').value || '').trim() || null;
+
+    if (!deviceId || !name) {
+      showToast('⚠️ Sensor ID and Name are required');
+      return;
+    }
+
+    const btn = document.querySelector('#node-register-overlay .btn-primary');
+    if (btn) btn.disabled = true;
+
+    try {
+      const token = localStorage.getItem('beekeeper_token');
+      const res = await fetch('/api/v1/sensors/devices/register', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body:    JSON.stringify({ deviceId, mac, name, vendor, hiveId, locationRole, locationNote }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Registration failed (' + res.status + ')');
+      }
+      const data = await res.json();
+      closeNodeRegisterModal();
+      showToast(data.created ? '✅ ' + deviceId + ' registered' : '✅ ' + deviceId + ' updated');
+      import('/dist/pages/node-health.js')
+        .then(mod => mod.loadNodeHealthPage())
+        .catch(() => {});
+    } catch (e) {
+      showToast('⚠️ ' + (e.message || 'Could not register sensor'));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
 
   function openNodeEditModal(btn) {
     const deviceId = btn.dataset.deviceId;

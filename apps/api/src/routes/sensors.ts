@@ -253,6 +253,109 @@ router.post("/devices", requireAuth, async (req: AuthRequest, res) => {
   res.status(201).json(created);
 });
 
+// ── POST /api/v1/sensors/devices/register ────────────────────────────────────
+// Admin path to register any MAC-based sensor device from the browser UI.
+// Mirrors the hub-key-authenticated /hubs/devices/provision endpoint but
+// requires a JWT (queen/worker). Used for C6 boards and any sensor that
+// appears in node health without a sensor_devices row.
+//
+// Idempotent:
+//   - If the MAC is already bound to this deviceId → update name/hive/location
+//   - If the MAC is already bound to a DIFFERENT deviceId → 409
+//   - If the deviceId already exists with a different MAC → relink MAC
+//   - Otherwise → create new row
+//
+// Once created, the hub daemon picks up the MAC→deviceId mapping on its next
+// cache refresh (GET /hubs/devices) so future readings carry the device ID.
+//
+// Returns: { device, created: boolean }
+
+const MAC_RE = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
+
+const registerDeviceSchema = z.object({
+  deviceId:     z.string().min(1).max(50),
+  mac:          z.string().regex(MAC_RE, "must be XX:XX:XX:XX:XX:XX"),
+  name:         z.string().min(1).max(255),
+  vendor:       z.string().min(1).max(100).default("generic"),
+  hiveId:       z.string().uuid().nullable().optional(),
+  locationRole: z.enum(LOCATION_ROLE_VALUES).nullable().optional(),
+  locationNote: z.string().max(500).nullable().optional(),
+});
+
+router.post("/devices/register", requireAuth, async (req: AuthRequest, res) => {
+  if (req.user?.role === "spectator") {
+    return res.status(403).json({ error: "Insufficient permissions" });
+  }
+
+  const body = registerDeviceSchema.safeParse(req.body);
+  if (!body.success) {
+    return res.status(400).json({ error: "Invalid input", details: body.error.flatten() });
+  }
+
+  const { deviceId, mac, name, vendor, hiveId, locationRole, locationNote } = body.data;
+  const macUpper = mac.toUpperCase();
+
+  if (hiveId) {
+    const hive = await db.hive.findUnique({ where: { id: hiveId }, select: { id: true } });
+    if (!hive) return res.status(404).json({ error: "Hive not found" });
+  }
+
+  try {
+    // MAC conflict: if this MAC is bound to a DIFFERENT deviceId, reject
+    const macConflict = await db.sensorDevice.findFirst({
+      where: { currentMac: macUpper, deviceId: { not: deviceId } },
+    });
+    if (macConflict) {
+      return res.status(409).json({
+        error:                "MAC already registered to a different device ID",
+        existingDeviceId:     macConflict.deviceId,
+      });
+    }
+
+    // Check if deviceId already exists (relink scenario)
+    const existing = await db.sensorDevice.findUnique({ where: { deviceId } });
+
+    if (existing) {
+      const updated = await db.sensorDevice.update({
+        where: { id: existing.id },
+        data: {
+          currentMac:   macUpper,
+          name,
+          vendor,
+          hiveId:       hiveId ?? null,
+          locationRole: locationRole ?? null,
+          locationNote: locationNote ?? null,
+          isActive:     true,
+        },
+      });
+      logger.info({ deviceId, mac: macUpper, relinked: existing.currentMac !== macUpper }, "sensor.admin_register.updated");
+      return res.json({ device: updated, created: false });
+    }
+
+    const created = await db.sensorDevice.create({
+      data: {
+        id:           crypto.randomUUID(),
+        deviceId,
+        currentMac:   macUpper,
+        vendor,
+        name,
+        hiveId:       hiveId ?? null,
+        locationRole: locationRole ?? null,
+        locationNote: locationNote ?? null,
+        provisionedAt: new Date(),
+        config:        { type: "sensor", registered_via: "admin_ui" } as unknown as Prisma.InputJsonValue,
+      },
+    });
+
+    logger.info({ deviceId, mac: macUpper, vendor }, "sensor.admin_register.created");
+    return res.status(201).json({ device: created, created: true });
+
+  } catch (err: any) {
+    logger.error({ err: err.message, deviceId, mac: macUpper }, "sensor.admin_register.error");
+    return res.status(500).json({ error: "Internal error", message: err.message });
+  }
+});
+
 // ── PATCH /api/v1/sensors/devices/:id ────────────────────────────────────────
 // Partial update of any sensor device — works for all vendors (unifi_protect,
 // tachyon, etc.). Only supplied fields are updated; omitted fields are unchanged.
