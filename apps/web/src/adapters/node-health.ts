@@ -13,6 +13,10 @@ export interface NodeHealthItem {
   lastSeenAt:       string;
   ageSec:           number;
   status:           'green' | 'yellow' | 'red';
+  // Hive context
+  hiveId:           string | null;
+  hiveName:         string | null;
+  deviceLabel:      string | null;
   // Latest metric values — null when no reading exists in the window
   temperature_c:    number | null;
   humidity_pct:     number | null;

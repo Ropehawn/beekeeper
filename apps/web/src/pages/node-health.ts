@@ -47,50 +47,70 @@ function metricRow(label: string, value: string): string {
 }
 
 function renderCard(item: NodeHealthItem): string {
-  const color  = STATUS_COLOR[item.status];
-  const label  = STATUS_LABEL[item.status];
-  const weight = item.weight_g !== null
-    ? fmt(item.weight_g, 0, 'g')
-    : fmt(item.hx711_raw_counts, 0, 'cts');
+  const color = STATUS_COLOR[item.status];
+  const label = STATUS_LABEL[item.status];
 
-  // Metric rows — only emit lines where a value exists
+  // ── Hive context line ────────────────────────────────────────────────────
+  const contextParts: string[] = [];
+  if (item.hiveName)    contextParts.push(item.hiveName);
+  if (item.deviceLabel) contextParts.push(item.deviceLabel);
+  const contextLine = contextParts.length
+    ? contextParts.join(' \u00b7 ')   // "Hive 3 · Node A"
+    : 'Unassigned';
+  const contextColor = contextParts.length ? '#94a3b8' : '#475569';
+
+  // ── HX711 display ────────────────────────────────────────────────────────
+  // weight_g → kg (calibrated); hx711_raw_counts → raw counts (uncalibrated)
+  let weightStr: string | null = null;
+  if (item.weight_g !== null) {
+    weightStr = `${(item.weight_g / 1000).toFixed(3)}\u202fkg`;
+  } else if (item.hx711_raw_counts !== null) {
+    weightStr = `${Math.round(item.hx711_raw_counts).toLocaleString()} counts (uncalibrated)`;
+  }
+
+  // ── Metric rows ──────────────────────────────────────────────────────────
   const rows: string[] = [];
+
   const temp  = fmt(item.temperature_c, 1, '°C');
   const hum   = fmt(item.humidity_pct,  1, '%');
   const press = fmt(item.pressure_pa != null ? item.pressure_pa / 100 : null, 1, 'hPa');
   const audio = fmt(item.audio_rms_dbfs, 1, 'dBFS');
 
   if (temp || hum) {
-    const parts = [temp, hum].filter(Boolean).join('  ·  ');
-    rows.push(metricRow('Env', parts));
+    rows.push(metricRow('Env', [temp, hum].filter(Boolean).join('  \u00b7  ')));
   }
-  if (press) rows.push(metricRow('Pressure', press));
-  if (weight) rows.push(metricRow('Weight', weight));
-  if (audio)  rows.push(metricRow('Audio RMS', audio));
+  if (press)      rows.push(metricRow('Pressure', press));
+  if (weightStr)  rows.push(metricRow('Weight', weightStr));
+  if (audio)      rows.push(metricRow('Audio RMS', audio));
 
-  // Capability badges
+  // ── Capability badges ────────────────────────────────────────────────────
   const badges: string[] = [];
   if (item.bme) badges.push(badge('BME'));
   if (item.hx)  badges.push(badge('HX711'));
   if (item.mic) badges.push(badge('MIC'));
 
   const rssiStr = item.signalRssi != null ? `${item.signalRssi}\u202fdBm` : '—';
+  const hasBody = rows.length > 0 || badges.length > 0;
 
   return `
     <div style="background:#1e293b;border:1px solid ${color};border-radius:8px;` +
       `padding:12px 16px;margin-bottom:10px;">
 
-      <!-- Header row: dot + MAC + status label + age -->
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+      <!-- Header: dot · MAC · status label -->
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
         ${dot(color)}
         <span style="font-weight:600;font-size:13px;color:#f1f5f9;font-family:monospace;` +
           `flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.deviceMac}</span>
         <span style="font-size:11px;font-weight:600;color:${color};flex-shrink:0;">${label}</span>
       </div>
 
-      <!-- Sub-header: vendor + seen + rssi -->
+      <!-- Hive context line -->
+      <div style="font-size:12px;color:${contextColor};margin-bottom:6px;` +
+        `padding-left:16px;">${contextLine}</div>
+
+      <!-- Sub-header: vendor · seen · rssi -->
       <div style="display:flex;justify-content:space-between;` +
-        `font-size:11px;color:#64748b;margin-bottom:${rows.length || badges.length ? '10px' : '0'};">
+        `font-size:11px;color:#64748b;margin-bottom:${hasBody ? '10px' : '0'};">
         <span>${item.vendor}</span>
         <span>${formatAge(item.ageSec)}&nbsp;&nbsp;${rssiStr}</span>
       </div>
