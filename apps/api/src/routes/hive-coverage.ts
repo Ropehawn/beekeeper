@@ -1,11 +1,14 @@
 // apps/api/src/routes/hive-coverage.ts
 //
-// GET /api/v1/hives/coverage
+// GET /api/v1/hives/coverage/:hiveId  — single hive
+// GET /api/v1/hives/coverage          — all active hives
 //
 // For every hive, compute which of the four sensing buckets
 // (internalClimate, externalClimate, scale, audio) are covered
-// by the active SensorDevices assigned to it, using deploymentProfile
-// as the authoritative source of that mapping.
+// by sensors assigned to it, drawing from BOTH sensor tables:
+//
+//   sensor_devices  — UniFi Protect + manually registered sensors
+//   sensor_registry — BLE/Tachyon sensors provisioned via the hub flow
 //
 // Auth:   requireAuth + requireRole("queen", "worker")
 // Stable: additive-only — no schema changes, reads existing columns.
@@ -49,27 +52,68 @@ function bucketsFor(profile: string | null): string[] {
   return PROFILE_BUCKETS[profile] ?? [];
 }
 
-// ── Shared query helper ───────────────────────────────────────────────────────
+// ── Normalised device shape — same for both sensor tables ─────────────────────
 
-async function fetchDevicesForHives(hiveIds: string[]) {
-  return db.sensorDevice.findMany({
-    where: { hiveId: { in: hiveIds }, isActive: true },
-    select: {
-      id:                true,
-      deviceId:          true,
-      name:              true,
-      hiveId:            true,
-      locationRole:      true,
-      deploymentProfile: true,
-    },
-  });
+interface RawDevice {
+  id:                string;
+  deviceId:          string;   // short identifier printed on label (e.g. "4AYHX")
+  name:              string;   // display name
+  hiveId:            string | null;
+  locationRole:      string | null;
+  deploymentProfile: string | null;
 }
+
+// ── Fetch from both tables and normalise ──────────────────────────────────────
+
+async function fetchDevicesForHives(hiveIds: string[]): Promise<RawDevice[]> {
+  const [devices, registry] = await Promise.all([
+    // sensor_devices: UniFi Protect + manually registered
+    db.sensorDevice.findMany({
+      where:  { hiveId: { in: hiveIds }, isActive: true },
+      select: { id: true, deviceId: true, name: true, hiveId: true,
+                locationRole: true, deploymentProfile: true },
+    }),
+
+    // sensor_registry: BLE/Tachyon sensors provisioned via the hub
+    // lifecycleStatus filters: exclude retired sensors
+    db.sensorRegistry.findMany({
+      where:  {
+        hiveId:          { in: hiveIds },
+        lifecycleStatus: { notIn: ["retired"] },
+      },
+      select: { id: true, deviceIdentifier: true, name: true, hiveId: true,
+                locationRole: true, deploymentProfile: true },
+    }),
+  ]);
+
+  const fromDevices: RawDevice[] = devices.map(d => ({
+    id:                d.id,
+    deviceId:          d.deviceId,
+    name:              d.name ?? d.deviceId,
+    hiveId:            d.hiveId ?? null,
+    locationRole:      d.locationRole      ?? null,
+    deploymentProfile: d.deploymentProfile ?? null,
+  }));
+
+  const fromRegistry: RawDevice[] = registry.map(r => ({
+    id:                r.id,
+    deviceId:          r.deviceIdentifier,
+    name:              r.name,
+    hiveId:            r.hiveId ?? null,
+    locationRole:      r.locationRole      ?? null,
+    deploymentProfile: r.deploymentProfile ?? null,
+  }));
+
+  return [...fromDevices, ...fromRegistry];
+}
+
+// ── Build coverage item for one hive ─────────────────────────────────────────
 
 function buildCoverageItem(
   hive: { id: string; name: string },
-  hiveDevices: Awaited<ReturnType<typeof fetchDevicesForHives>>,
+  hiveDevices: RawDevice[],
 ) {
-  const bucketDevices = new Map<string, typeof hiveDevices>();
+  const bucketDevices = new Map<string, RawDevice[]>();
   for (const { key } of BUCKET_DEFS) bucketDevices.set(key, []);
 
   for (const d of hiveDevices) {
@@ -78,12 +122,12 @@ function buildCoverageItem(
     }
   }
 
-  const deviceEntry = (d: typeof hiveDevices[number]) => ({
+  const deviceEntry = (d: RawDevice) => ({
     id:                d.id,
-    name:              d.name ?? d.deviceId,
+    name:              d.name,
     deviceId:          d.deviceId,
-    locationRole:      d.locationRole      ?? null,
-    deploymentProfile: d.deploymentProfile ?? null,
+    locationRole:      d.locationRole,
+    deploymentProfile: d.deploymentProfile,
   });
 
   const buckets = BUCKET_DEFS.map(({ key, label }) => {
@@ -95,7 +139,9 @@ function buildCoverageItem(
     hiveId:              hive.id,
     hiveName:            hive.name,
     assignedCount:       hiveDevices.length,
-    withoutProfileCount: hiveDevices.filter(d => !d.deploymentProfile || d.deploymentProfile === "custom").length,
+    withoutProfileCount: hiveDevices.filter(d =>
+      !d.deploymentProfile || d.deploymentProfile === "custom"
+    ).length,
     buckets,
   };
 }
@@ -125,13 +171,13 @@ hiveCoverageRouter.get(
   },
 );
 
+// GET /api/v1/hives/coverage — all active hives
 hiveCoverageRouter.get(
   "/coverage",
   requireAuth,
   requireRole("queen", "worker"),
   async (_req, res) => {
     try {
-      // ── 1. Load all hives ───────────────────────────────────────────────────
       const hives = await db.hive.findMany({
         where:   { status: "active" },
         select:  { id: true, name: true },
@@ -144,33 +190,28 @@ hiveCoverageRouter.get(
 
       const hiveIds = hives.map(h => h.id);
 
-      // ── 2. Load all active sensor devices for these hives ──────────────────
       const allDevices = await fetchDevicesForHives(hiveIds);
 
       // Index by hiveId for O(1) lookup
-      const devicesByHive = new Map<string, typeof allDevices>();
+      const devicesByHive = new Map<string, RawDevice[]>();
       for (const d of allDevices) {
         if (!d.hiveId) continue;
         if (!devicesByHive.has(d.hiveId)) devicesByHive.set(d.hiveId, []);
         devicesByHive.get(d.hiveId)!.push(d);
       }
 
-      // ── 3. Build coverage items ─────────────────────────────────────────────
       const items = hives.map(hive => {
         const item = buildCoverageItem(hive, devicesByHive.get(hive.id) ?? []);
         return { ...item, _missingCount: item.buckets.filter(b => !b.covered).length };
       });
 
-      // ── 4. Sort worst-first (most missing buckets), then alpha by name ──────
       items.sort((a, b) => {
         const diff = b._missingCount - a._missingCount;
         if (diff !== 0) return diff;
         return a.hiveName.localeCompare(b.hiveName);
       });
 
-      // Strip the internal sort key before sending
       const payload = items.map(({ _missingCount: _mc, ...rest }) => rest);
-
       return res.json({ items: payload, count: payload.length });
 
     } catch (err) {
