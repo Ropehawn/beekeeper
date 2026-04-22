@@ -494,6 +494,70 @@ router.delete("/devices/:id", requireAuth, async (req: AuthRequest, res) => {
 
 const FRESH_THRESHOLD_MS = 60_000;
 
+// ── Metric display metadata ────────────────────────────────────────────────────
+// Ordered — determines display order in readings[].
+// Extend this array to surface any new metric automatically everywhere.
+
+interface MetricMeta {
+  metric:  string;
+  label:   string;
+  icon:    string;
+  unit:    string;
+  format:  (value: number) => string;
+}
+
+const METRIC_META: MetricMeta[] = [
+  { metric: "temp_f",       label: "Temperature", icon: "🌡️",  unit: "°F",  format: v => `${v.toFixed(1)}°F` },
+  { metric: "temp_c",       label: "Temperature", icon: "🌡️",  unit: "°F",  format: v => `${((v * 9) / 5 + 32).toFixed(1)}°F` },
+  { metric: "humidity_rh",  label: "Humidity",    icon: "💧",  unit: "%",   format: v => `${v.toFixed(0)}%` },
+  { metric: "pressure_hpa", label: "Pressure",    icon: "🔵",  unit: "hPa", format: v => `${v.toFixed(0)} hPa` },
+  { metric: "weight_g",     label: "Weight",      icon: "⚖️",  unit: "lb",  format: v => `${(v / 453.592).toFixed(2)} lb` },
+  { metric: "lux",          label: "Light",       icon: "☀️",  unit: "lux", format: v => `${Math.round(v)} lux` },
+  { metric: "battery_v",    label: "Battery",     icon: "🔋",  unit: "V",   format: v => `${v.toFixed(2)}V` },
+];
+
+const META_BY_METRIC = new Map(METRIC_META.map(m => [m.metric, m]));
+const METRIC_ORDER   = new Map(METRIC_META.map((m, i) => [m.metric, i]));
+
+interface ReadingEntry {
+  metric:       string;
+  label:        string;
+  icon:         string;
+  displayValue: string;
+  rawValue:     number;
+  unit:         string;
+  source:       string;
+  deviceName:   string | null;
+  deviceId:     string | null;
+  recordedAt:   Date;
+  minutesAgo:   number;
+}
+
+function makeEntry(
+  metric: string,
+  value:  number,
+  source: string,
+  deviceName: string | null,
+  deviceId:   string | null,
+  recordedAt: Date,
+): ReadingEntry | null {
+  const meta = META_BY_METRIC.get(metric);
+  if (!meta) return null;
+  return {
+    metric,
+    label:        meta.label,
+    icon:         meta.icon,
+    displayValue: meta.format(value),
+    rawValue:     value,
+    unit:         meta.unit,
+    source,
+    deviceName,
+    deviceId,
+    recordedAt,
+    minutesAgo:   Math.round((Date.now() - recordedAt.getTime()) / 60_000),
+  };
+}
+
 function formatReading(hiveId: string, reading: {
   deviceId:  string;
   tempF:     number | null;
@@ -521,68 +585,128 @@ router.get("/latest", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "hiveId query parameter is required (UUID)" });
   }
 
-  // ── 1. Find active devices for this hive ──────────────────────────────────
-  const devices = await db.sensorDevice.findMany({
-    where:  { hiveId, isActive: true },
-    select: { id: true, deviceId: true, name: true },
-  });
+  // ── 1. Find active UniFi devices + latest BLE readings in parallel ────────
+  const [devices, bleRaws] = await Promise.all([
+    db.sensorDevice.findMany({
+      where:  { hiveId, isActive: true },
+      select: { id: true, deviceId: true, name: true },
+    }),
+    // Most recent reading per metric from sensor_readings_raw (BLE/Tachyon hub)
+    db.sensorReadingRaw.findMany({
+      where:   { hiveId },
+      orderBy: { recordedAt: "desc" },
+      select:  { metric: true, value: true, unit: true, recordedAt: true,
+                 deviceMac: true, device: { select: { name: true, deviceId: true } } },
+    }),
+  ]);
 
-  if (devices.length === 0) return res.json(null);
-
-  // ── 2. Check for a fresh cached reading (< 60 s old) ─────────────────────
-  const freshCutoff = new Date(Date.now() - FRESH_THRESHOLD_MS);
-  const freshReading = await db.sensorReading.findFirst({
-    where:   { deviceId: { in: devices.map(d => d.id) }, recordedAt: { gte: freshCutoff } },
-    orderBy: { recordedAt: "desc" },
-    include: { device: { select: { name: true, deviceId: true } } },
-  });
-
-  if (freshReading) {
-    return res.json(formatReading(hiveId, freshReading));
+  // Deduplicate BLE: keep most recent row per metric (results are ordered desc already)
+  const bleByMetric = new Map<string, typeof bleRaws[number]>();
+  for (const row of bleRaws) {
+    if (!bleByMetric.has(row.metric)) bleByMetric.set(row.metric, row);
   }
 
-  // ── 3. Cache miss — call the UniFi cloud API ──────────────────────────────
-  const apiKey = process.env.UNIFI_API_KEY;
-  const hostId = process.env.UNIFI_HOST_ID;
-  if (apiKey && hostId) {
-    for (const device of devices) {
-      const unifiData = await fetchUnifiSensor(device.deviceId, apiKey, hostId);
-      if (!unifiData) continue;
+  // ── 2. Build BLE reading entries ──────────────────────────────────────────
+  const bleEntries: ReadingEntry[] = [];
+  for (const [metric, row] of bleByMetric) {
+    const entry = makeEntry(
+      metric,
+      row.value,
+      "ble",
+      row.device?.name ?? row.deviceMac ?? null,
+      row.device?.deviceId ?? row.deviceMac ?? null,
+      row.recordedAt,
+    );
+    if (entry) bleEntries.push(entry);
+  }
 
-      // Convert °C → °F and persist
-      const tempF = unifiData.tempC != null ? (unifiData.tempC * 9) / 5 + 32 : null;
-      const stored = await db.sensorReading.create({
-        data: {
-          id:         crypto.randomUUID(),
-          deviceId:   device.id,
-          tempF,
-          humidity:   unifiData.humidity,
-          lux:        unifiData.lux,
-          weight:     null,
-          recordedAt: new Date(),
-        },
-        include: { device: { select: { name: true, deviceId: true } } },
-      });
+  // ── 3. UniFi path: cache-through sensor_readings ──────────────────────────
+  let unifiReading: ReturnType<typeof formatReading> | null = null;
 
-      logger.info(
-        { hiveId, unifiDeviceId: device.deviceId, tempF },
-        "Sensor reading fetched from UniFi cloud and stored"
-      );
-      return res.json(formatReading(hiveId, stored));
+  if (devices.length > 0) {
+    const freshCutoff  = new Date(Date.now() - FRESH_THRESHOLD_MS);
+    const freshReading = await db.sensorReading.findFirst({
+      where:   { deviceId: { in: devices.map(d => d.id) }, recordedAt: { gte: freshCutoff } },
+      orderBy: { recordedAt: "desc" },
+      include: { device: { select: { name: true, deviceId: true } } },
+    });
+
+    if (freshReading) {
+      unifiReading = formatReading(hiveId, freshReading);
+    } else {
+      const apiKey = process.env.UNIFI_API_KEY;
+      const hostId = process.env.UNIFI_HOST_ID;
+      if (apiKey && hostId) {
+        for (const device of devices) {
+          const unifiData = await fetchUnifiSensor(device.deviceId, apiKey, hostId);
+          if (!unifiData) continue;
+          const tempF  = unifiData.tempC != null ? (unifiData.tempC * 9) / 5 + 32 : null;
+          const stored = await db.sensorReading.create({
+            data: { id: crypto.randomUUID(), deviceId: device.id, tempF,
+                    humidity: unifiData.humidity, lux: unifiData.lux, weight: null, recordedAt: new Date() },
+            include: { device: { select: { name: true, deviceId: true } } },
+          });
+          logger.info({ hiveId, unifiDeviceId: device.deviceId, tempF }, "Sensor reading fetched from UniFi cloud and stored");
+          unifiReading = formatReading(hiveId, stored);
+          break;
+        }
+        if (!unifiReading) logger.warn({ hiveId }, "UniFi cloud API returned no data — falling back to stale DB reading");
+      }
+
+      if (!unifiReading) {
+        const staleReading = await db.sensorReading.findFirst({
+          where:   { deviceId: { in: devices.map(d => d.id) } },
+          orderBy: { recordedAt: "desc" },
+          include: { device: { select: { name: true, deviceId: true } } },
+        });
+        if (staleReading) unifiReading = formatReading(hiveId, staleReading);
+      }
     }
-
-    logger.warn({ hiveId }, "UniFi cloud API returned no data — falling back to stale DB reading");
   }
 
-  // ── 4. UniFi unavailable (no key or all calls failed) — return stale or null
-  const staleReading = await db.sensorReading.findFirst({
-    where:   { deviceId: { in: devices.map(d => d.id) } },
-    orderBy: { recordedAt: "desc" },
-    include: { device: { select: { name: true, deviceId: true } } },
-  });
+  // ── 4. Build UniFi reading entries from columnar fields ───────────────────
+  const unifiEntries: ReadingEntry[] = [];
+  if (unifiReading) {
+    const { deviceName, deviceId: devId, recordedAt } = unifiReading;
+    const cols: [string, number | null][] = [
+      ["temp_f",      unifiReading.tempF],
+      ["humidity_rh", unifiReading.humidity],
+      ["lux",         unifiReading.lux],
+    ];
+    for (const [metric, val] of cols) {
+      if (val == null) continue;
+      const entry = makeEntry(metric, val, "unifi", deviceName, devId, new Date(recordedAt));
+      if (entry) unifiEntries.push(entry);
+    }
+  }
 
-  if (!staleReading) return res.json(null);
-  return res.json(formatReading(hiveId, staleReading));
+  // ── 5. Merge: BLE wins if same label exists in both (BLE is more granular) -
+  const bleLabels = new Set(bleEntries.map(e => e.label));
+  const merged    = [
+    ...bleEntries,
+    ...unifiEntries.filter(e => !bleLabels.has(e.label)),
+  ].sort((a, b) =>
+    (METRIC_ORDER.get(a.metric) ?? 99) - (METRIC_ORDER.get(b.metric) ?? 99),
+  );
+
+  // ── 6. Return nothing if truly no data at all ─────────────────────────────
+  if (merged.length === 0 && !unifiReading) return res.json(null);
+
+  // ── 7. Respond: new readings[] array + legacy fields for backward compat ──
+  return res.json({
+    hiveId,
+    readings: merged,
+    // Legacy scalar fields — kept for any callers that haven't migrated yet
+    ...(unifiReading ? {
+      deviceId:   unifiReading.deviceId,
+      deviceName: unifiReading.deviceName,
+      tempF:      unifiReading.tempF,
+      humidity:   unifiReading.humidity,
+      lux:        unifiReading.lux,
+      recordedAt: unifiReading.recordedAt,
+      minutesAgo: unifiReading.minutesAgo,
+    } : {}),
+  });
 });
 
 // ── GET /api/v1/sensors/history ───────────────────────────────────────────────

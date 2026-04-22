@@ -3396,7 +3396,7 @@
       location: 'N/A', status: 'pending', statusColor: '#9ca3af',
       healthScore: null, healthColor: '#9ca3af',
       queen: { seen: false, lastSeen: 'N/A', markColor: 'N/A', layingPattern: 'N/A', notes: 'No inspections recorded yet' },
-      sensors: { temp: 'N/A', humidity: 'N/A', lux: 'N/A' },
+      sensors: { readings: [], minutesAgo: null },
       stats: [
         { label: 'Days Since Install', value: 'N/A', sub: 'Not yet installed' },
         { label: 'Frames Drawn', value: 'N/A', sub: 'No inspection data' },
@@ -3716,14 +3716,14 @@
         if (!h.score) h.score = hiveScore || null;
 
         // ── Apply live sensor readings ──
-        // Populates the sensor badges in hive detail (conditional on temp !== 'N/A').
-        // minutesAgo is stored so the render layer can show staleness if needed.
+        // readings[] is data-driven from the server — iterate directly, no hardcoded metrics.
         if (sensorData) {
           h.sensors = {
-            temp:      sensorData.tempF    != null ? sensorData.tempF.toFixed(1) + '°F' : 'N/A',
-            humidity:  sensorData.humidity != null ? sensorData.humidity.toFixed(0) + '%' : 'N/A',
-            lux:       sensorData.lux      != null ? sensorData.lux.toFixed(0) + ' lux' : 'N/A',
-            minutesAgo: sensorData.minutesAgo,
+            readings:   sensorData.readings  || [],
+            minutesAgo: sensorData.minutesAgo != null ? sensorData.minutesAgo
+                          : (sensorData.readings && sensorData.readings.length
+                              ? Math.min(...sensorData.readings.map(r => r.minutesAgo))
+                              : null),
           };
         }
 
@@ -3925,16 +3925,20 @@
       <div class="grid-2" style="margin-bottom:0;">
         <div style="display:flex;flex-direction:column;gap:12px;">
 
-          <!-- Live Sensors — from UniFi Protect (N/A until connected) -->
-          ${h.sensors.temp !== 'N/A' ? `
+          <!-- Live Sensors — data-driven from server readings[] array -->
+          ${(h.sensors.readings && h.sensors.readings.length > 0) ? `
           <div class="sensor-row" style="margin-bottom:0;">
-            <div class="sensor-badge"><span class="s-icon">🌡️</span><div><div class="s-val">${h.sensors.temp}</div><div class="s-label">Temp</div></div><div class="s-live"></div></div>
-            <div class="sensor-badge"><span class="s-icon">💧</span><div><div class="s-val">${h.sensors.humidity}</div><div class="s-label">Humidity</div></div><div class="s-live"></div></div>
-            <div class="sensor-badge"><span class="s-icon">☀️</span><div><div class="s-val">${h.sensors.lux}</div><div class="s-label">Lux</div></div><div class="s-live"></div></div>
+            ${h.sensors.readings.map(r => {
+              const fresh = r.minutesAgo < 5;
+              const dot   = fresh
+                ? `<div class="s-live"></div>`
+                : `<div class="s-live" style="background:${r.minutesAgo < 30 ? '#f59e0b' : '#64748b'};animation:none;"></div>`;
+              return `<div class="sensor-badge"><span class="s-icon">${r.icon}</span><div><div class="s-val">${r.displayValue}</div><div class="s-label">${r.label}</div></div>${dot}</div>`;
+            }).join('')}
           </div>` : `
           <div style="background:#f8f8f8;border:1px dashed #d1d5db;border-radius:8px;padding:14px;text-align:center;">
-            <div style="font-size:11px;font-weight:600;color:#aaa;">📡 Sensors not connected</div>
-            <div style="font-size:10px;color:#bbb;">UniFi Protect required</div>
+            <div style="font-size:11px;font-weight:600;color:#aaa;">📡 No sensor readings</div>
+            <div style="font-size:10px;color:#bbb;">Assign a sensor with a deployment profile to this hive</div>
           </div>`}
 
           <!-- Camera snapshot or placeholder -->
