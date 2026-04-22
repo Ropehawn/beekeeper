@@ -410,10 +410,13 @@ const BeeAPI = (() => {
 
   // GET /api/v1/hives/coverage/:hiveId
   // Returns sensor coverage for a single hive:
-  // { hiveId, hiveName, assignedCount, withoutProfileCount,
-  //   buckets: [{ key, label, covered, devices: [{ id, name, deviceId, locationRole, deploymentProfile }] }] }
-  async function getHiveCoverage(hiveId) {
-    return request('GET', `/api/v1/hives/coverage/${encodeURIComponent(hiveId)}`);
+  // { hiveId, hiveName,
+  //   sensors: [{ id, name, deviceId, source, profileLabel, locationRoleLabel,
+  //               liveStatus, lastSeenAt, lastSeenAgo,
+  //               readings: [{ label, displayValue, recordedAt }] }],
+  //   gaps: string[] }
+  async function getHiveSensorStatus(hiveId) {
+    return request('GET', `/api/v1/hives/status/${encodeURIComponent(hiveId)}`);
   }
 
   // ── Public API ────────────────────────────────────────────
@@ -443,6 +446,6 @@ const BeeAPI = (() => {
     getHiveScore,
     getHiveHealthAnalysis,
     getHiveSummary,
-    getHiveCoverage,
+    getHiveSensorStatus,
   };
 })();

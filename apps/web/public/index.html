@@ -3396,7 +3396,7 @@
       location: 'N/A', status: 'pending', statusColor: '#9ca3af',
       healthScore: null, healthColor: '#9ca3af',
       queen: { seen: false, lastSeen: 'N/A', markColor: 'N/A', layingPattern: 'N/A', notes: 'No inspections recorded yet' },
-      sensors: { readings: [], minutesAgo: null },
+      sensorStatus: null,
       stats: [
         { label: 'Days Since Install', value: 'N/A', sub: 'Not yet installed' },
         { label: 'Frames Drawn', value: 'N/A', sub: 'No inspection data' },
@@ -3471,7 +3471,7 @@
     const realHiveId = _realHiveIds[id];
     if (realHiveId && BeeAPI.isLoggedIn()) {
       try {
-        const [inspections, feedings, varroaCounts, treatmentLogs, hiveAlerts, hiveScore, sensorData, coverageData] = await Promise.all([
+        const [inspections, feedings, varroaCounts, treatmentLogs, hiveAlerts, hiveScore, sensorData, sensorStatus] = await Promise.all([
           BeeAPI.getInspections(realHiveId).catch(() => []),
           BeeAPI.getFeedingLogs(realHiveId).catch(() => []),
           BeeAPI.getVarroaCounts(realHiveId, 10).catch(() => []),
@@ -3479,7 +3479,7 @@
           BeeAPI.getHiveAlerts(realHiveId).catch(() => []),
           BeeAPI.getHiveScore(realHiveId).catch(() => null),
           BeeAPI.getLatestSensorReading(realHiveId).catch(() => null),
-          BeeAPI.getHiveCoverage(realHiveId).catch(() => null),
+          BeeAPI.getHiveSensorStatus(realHiveId).catch(() => null),
         ]);
 
         // ── Replace inspections with real data ──
@@ -3715,22 +3715,9 @@
         // h.score already set above if hiveScore loaded; keep in sync
         if (!h.score) h.score = hiveScore || null;
 
-        // ── Apply live sensor readings ──
-        // readings[] is data-driven from the server — iterate directly, no hardcoded metrics.
-        if (sensorData) {
-          h.sensors = {
-            readings:   sensorData.readings  || [],
-            minutesAgo: sensorData.minutesAgo != null ? sensorData.minutesAgo
-                          : (sensorData.readings && sensorData.readings.length
-                              ? Math.min(...sensorData.readings.map(r => r.minutesAgo))
-                              : null),
-          };
-        }
-
-        // ── Apply sensor coverage ──
-        // buckets array + assignedCount + withoutProfileCount from the server.
-        // null when the request failed — renderer shows a fallback.
-        h.sensorCoverage = coverageData || null;
+        // ── Apply sensor status ──
+        // sensors[] + gaps[] come from the server — nothing hardcoded on the client.
+        h.sensorStatus = sensorStatus || null;
 
       } catch (e) {
         console.warn('Failed to load hive detail data:', e.message);
@@ -3768,98 +3755,81 @@
   // Renders a compact bucket-coverage card for the hive detail page.
   // cov is the response from GET /api/v1/hives/coverage/:hiveId, or null on failure.
   // All labels and bucket keys come from cov.buckets — nothing is hardcoded here.
-  function renderSensorCoverageCard(cov) {
-    if (!cov) {
-      return `
-        <div class="card">
-          <div class="card-title">📡 Sensor Coverage</div>
-          <div style="font-size:11px;color:#aaa;font-style:italic;padding:6px 0;">
-            Coverage data unavailable
-          </div>
-        </div>`;
+  function renderSensorStatusSection(status) {
+    const STATUS_LABEL = { live: 'Live', stale: 'Stale', offline: 'Offline', no_data: 'No data' };
+    const STATUS_COLOR = { live: '#22c55e', stale: '#f59e0b', offline: '#9ca3af', no_data: '#9ca3af' };
+
+    function fmtAgo(sec) {
+      if (sec == null) return 'Never';
+      if (sec < 60)   return `${sec}s ago`;
+      if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+      return `${Math.round(sec / 3600)}h ago`;
     }
 
-    const coveredCount = cov.buckets.filter(b => b.covered).length;
-    const totalCount   = cov.buckets.length;
-    const allGood      = coveredCount === totalCount;
-    const hasAnySensors = (cov.allDevices || []).length > 0;
-    const statusColor  = allGood ? '#22c55e' : coveredCount === 0 ? '#ef4444' : '#f59e0b';
-    const statusLabel  = allGood
-      ? `All ${totalCount} covered`
-      : `${coveredCount} / ${totalCount} covered`;
-
-    // Assigned sensors section — always shown when any sensors are assigned,
-    // so users can see their hardware even before deployment profiles are set.
-    let assignedSection = '';
-    if (hasAnySensors) {
-      const deviceChips = (cov.allDevices || []).map(d => {
-        const label = d.name || d.deviceId;
-        const sub   = d.deploymentProfile
-          ? `<span style="color:#64748b;font-size:9px;margin-left:4px;">${d.deploymentProfile.replace(/_/g,' ')}</span>`
-          : `<span style="color:#d97706;font-size:9px;margin-left:4px;">no profile</span>`;
-        return `<span style="display:inline-flex;align-items:center;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;padding:2px 6px;margin:2px;font-size:11px;color:#334155;">${label}${sub}</span>`;
-      }).join('');
-      assignedSection = `
-        <div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;">
-          <div style="font-size:10px;color:#888;font-weight:600;margin-bottom:4px;">ASSIGNED SENSORS</div>
-          <div style="flex-wrap:wrap;display:flex;">${deviceChips}</div>
-        </div>`;
-    }
-
-    // Bucket rows — "not covered by any sensor" rather than "no sensor assigned"
-    // when sensors exist but none cover that bucket.
-    const rows = cov.buckets.map(b => {
-      const indicator = b.covered
-        ? `<span style="color:#22c55e;font-size:11px;font-weight:700;width:44px;flex-shrink:0;">✓ Yes</span>`
-        : `<span style="color:#ef4444;font-size:11px;font-weight:700;width:44px;flex-shrink:0;">✗ No</span>`;
-
-      let detail;
-      if (b.covered) {
-        detail = b.devices.map(d => {
-          const name = d.name || d.deviceId;
-          const id   = (d.name && d.deviceId && d.name !== d.deviceId)
-            ? ` <span style="color:#94a3b8;font-family:monospace;font-size:10px;">(${d.deviceId})</span>`
-            : '';
-          const role = d.locationRole
-            ? ` <span style="color:#64748b;font-size:10px;">· ${d.locationRole}</span>`
-            : '';
-          return `<span style="color:#374151;">${name}</span>${id}${role}`;
-        }).join('<span style="color:#cbd5e1;margin:0 3px;">·</span>');
-      } else if (hasAnySensors) {
-        detail = `<span style="color:#94a3b8;font-size:11px;font-style:italic;">Not covered — set a deployment profile</span>`;
-      } else {
-        detail = `<span style="color:#94a3b8;font-size:11px;font-style:italic;">No sensor assigned</span>`;
-      }
-
-      return `
-        <div style="display:flex;align-items:baseline;gap:8px;padding:4px 0;border-bottom:1px solid #f0f0f0;">
-          <span style="font-size:11px;color:#888;width:110px;flex-shrink:0;">${b.label}</span>
-          ${indicator}
-          <span style="flex:1;min-width:0;font-size:11px;line-height:1.4;">${detail}</span>
-        </div>`;
-    }).join('');
-
-    // Bottom hint
-    let hint = '';
-    if (!allGood && !hasAnySensors) {
-      hint = `<div style="font-size:10px;color:#888;margin-top:8px;font-style:italic;">No sensors assigned to this hive yet.</div>`;
-    } else if (!allGood && cov.withoutProfileCount > 0) {
-      const noun = cov.withoutProfileCount === 1 ? 'sensor' : 'sensors';
-      hint = `<div style="font-size:10px;color:#d97706;margin-top:8px;">
-        ⚠ ${cov.withoutProfileCount} ${noun} need a deployment profile to contribute coverage —
-        <span style="cursor:pointer;text-decoration:underline;" onclick="nav('node-health')">open Node Health</span>.
+    if (!status) {
+      return `<div class="card">
+        <div class="card-title" style="margin-bottom:8px;">Sensor Status</div>
+        <div style="font-size:12px;color:#9ca3af;">Unable to load sensor data.</div>
       </div>`;
     }
 
+    const { sensors, gaps } = status;
+
+    if (!sensors || sensors.length === 0) {
+      return `<div class="card">
+        <div class="card-title" style="margin-bottom:8px;">Sensor Status</div>
+        <div style="font-size:12px;color:#9ca3af;">No sensors assigned to this hive.</div>
+        ${gaps && gaps.length ? `<div style="margin-top:10px;">${gaps.map(g =>
+          `<div style="font-size:12px;color:#ef4444;margin-bottom:3px;">${g}</div>`
+        ).join('')}</div>` : ''}
+      </div>`;
+    }
+
+    const sensorRows = sensors.map(s => {
+      const meta = [s.profileLabel, s.locationRoleLabel].filter(Boolean).join('  ·  ');
+      const statusColor = STATUS_COLOR[s.liveStatus] || '#9ca3af';
+      const statusLabel = STATUS_LABEL[s.liveStatus] || s.liveStatus;
+
+      const readingsHtml = s.readings && s.readings.length
+        ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:16px;">
+            ${s.readings.map(r =>
+              `<span style="font-size:12px;color:#1e293b;">
+                <span style="color:#64748b;font-size:11px;">${r.label}:</span> ${r.displayValue}
+              </span>`
+            ).join('')}
+          </div>`
+        : `<div style="margin-top:5px;font-size:11px;color:#9ca3af;">No readings in the last 24 hours.</div>`;
+
+      return `
+        <div style="padding:10px 0;border-bottom:1px solid #f1f5f9;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+            <div>
+              <div style="font-size:13px;font-weight:600;color:#1e293b;">${s.name}</div>
+              <div style="font-size:11px;color:#64748b;margin-top:2px;">
+                ${s.deviceId}${meta ? '  ·  ' + meta : ''}
+              </div>
+            </div>
+            <div style="text-align:right;flex-shrink:0;">
+              <div style="font-size:12px;font-weight:600;color:${statusColor};">${statusLabel}</div>
+              <div style="font-size:10px;color:#9ca3af;margin-top:1px;">${fmtAgo(s.lastSeenAgo)}</div>
+            </div>
+          </div>
+          ${readingsHtml}
+        </div>`;
+    }).join('');
+
+    const gapsHtml = gaps && gaps.length
+      ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid #f1f5f9;">
+          <div style="font-size:10px;font-weight:600;color:#9ca3af;letter-spacing:.05em;margin-bottom:5px;">MISSING</div>
+          ${gaps.map(g => `<div style="font-size:12px;color:#ef4444;margin-bottom:3px;">${g}</div>`).join('')}
+        </div>`
+      : '';
+
     return `
       <div class="card">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-          <div class="card-title" style="margin:0;">📡 Sensor Coverage</div>
-          <span style="font-size:11px;font-weight:600;color:${statusColor};">${statusLabel}</span>
-        </div>
-        ${assignedSection}
-        <div>${rows}</div>
-        ${hint}
+        <div class="card-title" style="margin-bottom:4px;">Sensor Status</div>
+        ${sensorRows}
+        ${gapsHtml}
       </div>`;
   }
 
@@ -3925,22 +3895,6 @@
       <div class="grid-2" style="margin-bottom:0;">
         <div style="display:flex;flex-direction:column;gap:12px;">
 
-          <!-- Live Sensors — data-driven from server readings[] array -->
-          ${(h.sensors.readings && h.sensors.readings.length > 0) ? `
-          <div class="sensor-row" style="margin-bottom:0;">
-            ${h.sensors.readings.map(r => {
-              const fresh = r.minutesAgo < 5;
-              const dot   = fresh
-                ? `<div class="s-live"></div>`
-                : `<div class="s-live" style="background:${r.minutesAgo < 30 ? '#f59e0b' : '#64748b'};animation:none;"></div>`;
-              return `<div class="sensor-badge"><span class="s-icon">${r.icon}</span><div><div class="s-val">${r.displayValue}</div><div class="s-label">${r.label}</div></div>${dot}</div>`;
-            }).join('')}
-          </div>` : `
-          <div style="background:#f8f8f8;border:1px dashed #d1d5db;border-radius:8px;padding:14px;text-align:center;">
-            <div style="font-size:11px;font-weight:600;color:#aaa;">📡 No sensor readings</div>
-            <div style="font-size:10px;color:#bbb;">Assign a sensor with a deployment profile to this hive</div>
-          </div>`}
-
           <!-- Camera snapshot or placeholder -->
           <div class="camera-feed" id="hive-camera-card">
             <div class="camera-overlay"><div class="live-dot"></div> ${liveName} Cam</div>
@@ -3949,8 +3903,8 @@
             </div>
           </div>
 
-          <!-- Sensor Coverage — bucket-level view driven by deploymentProfile data -->
-          ${renderSensorCoverageCard(h.sensorCoverage || null)}
+          <!-- Sensor Status — per-sensor live data, readings, and gap summary -->
+          ${renderSensorStatusSection(h.sensorStatus || null)}
         </div>
 
         <div style="display:flex;flex-direction:column;gap:12px;">
