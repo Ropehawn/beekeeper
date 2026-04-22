@@ -1,0 +1,8 @@
+{
+  "hubId": "00000000-0000-0000-0000-000000000000",
+  "hubName": "Tachyon-UNNAMED",
+  "apiKey": "replace-with-real-hub-key-from-api-provision-response",
+  "apiUrl": "https://beekeeper-api-production.up.railway.app",
+  "scanIntervalSec": 60,
+  "uploadIntervalSec": 300
+}

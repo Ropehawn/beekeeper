@@ -1,0 +1,11 @@
+# Runtime state — lives on each Tachyon, not in git
+hub-config.json
+sensor_registry.json
+device_cache.json
+registry_backups/
+labels/
+__pycache__/
+*.pyc
+*.log
+ble_daemon.log
+provision_web.log
