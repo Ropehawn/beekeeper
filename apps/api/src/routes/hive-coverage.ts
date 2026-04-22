@@ -329,7 +329,7 @@ hiveCoverageRouter.get(
       const [unifiDevices, registryDevices] = await Promise.all([
         db.sensorDevice.findMany({
           where:  { hiveId, isActive: true },
-          select: { id: true, deviceId: true, name: true,
+          select: { id: true, deviceId: true, name: true, currentMac: true,
                     locationRole: true, deploymentProfile: true },
         }),
         db.sensorRegistry.findMany({
@@ -339,9 +339,19 @@ hiveCoverageRouter.get(
         }),
       ]);
 
-      // ── 2. Batch-fetch readings (24 h window) ────────────────────────────
-      const readingWindow  = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      // ── 2. Batch-fetch readings (7-day window — show last known even if stale) ─
+      // sensor_readings      — columnar, UniFi path, keyed by sensor_devices.id
+      // sensor_readings_raw  — metric rows, BLE/hub path.
+      //   Match by deviceMac (sensor_devices.currentMac | sensor_registry.currentMacAddress)
+      //   OR by deviceId (sensor_devices.id) OR by hiveId as last-resort fallback.
+      const readingWindow  = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
       const unifiDeviceIds = unifiDevices.map(d => d.id);
+
+      // Collect all known MACs from both tables (upper-cased for consistent matching)
+      const knownMacs = [
+        ...unifiDevices.map(d => d.currentMac).filter((m): m is string => m != null),
+        ...registryDevices.map(d => d.currentMacAddress).filter((m): m is string => m != null),
+      ].map(m => m.toUpperCase());
 
       const [unifiReadings, rawReadings] = await Promise.all([
         unifiDeviceIds.length > 0
@@ -354,7 +364,14 @@ hiveCoverageRouter.get(
           : Promise.resolve([] as Array<{ deviceId: string; tempF: number | null; humidity: number | null; lux: number | null; weight: number | null; recordedAt: Date }>),
 
         db.sensorReadingRaw.findMany({
-          where:   { hiveId, recordedAt: { gte: readingWindow } },
+          where: {
+            recordedAt: { gte: readingWindow },
+            OR: [
+              ...(knownMacs.length     > 0 ? [{ deviceMac: { in: knownMacs } }] : []),
+              ...(unifiDeviceIds.length > 0 ? [{ deviceId:  { in: unifiDeviceIds } }] : []),
+              { hiveId },
+            ],
+          },
           orderBy: { recordedAt: "desc" },
           select:  { deviceMac: true, deviceId: true, metric: true,
                      value: true, unit: true, recordedAt: true },
@@ -374,8 +391,9 @@ hiveCoverageRouter.get(
 
       for (const r of rawReadings) {
         if (r.deviceMac) {
-          if (!rawByMac.has(r.deviceMac)) rawByMac.set(r.deviceMac, new Map());
-          const m = rawByMac.get(r.deviceMac)!;
+          const mac = r.deviceMac.toUpperCase();
+          if (!rawByMac.has(mac)) rawByMac.set(mac, new Map());
+          const m = rawByMac.get(mac)!;
           if (!m.has(r.metric)) m.set(r.metric, r);
         }
         if (r.deviceId) {
@@ -418,10 +436,12 @@ hiveCoverageRouter.get(
       const sensors: object[] = [];
 
       for (const d of unifiDevices) {
-        const unifi      = latestUnifi.get(d.id);
-        const rawMap     = rawByDeviceUuid.get(d.id);
+        const unifi       = latestUnifi.get(d.id);
+        // Readings from raw table: prefer match by UUID, fall back to MAC
+        const macKey      = d.currentMac ? d.currentMac.toUpperCase() : null;
+        const rawMap      = rawByDeviceUuid.get(d.id) ?? (macKey ? rawByMac.get(macKey) : undefined);
         const rawLastSeen = latestTimestamp(rawMap);
-        const lastSeenAt = [unifi?.recordedAt ?? null, rawLastSeen]
+        const lastSeenAt  = [unifi?.recordedAt ?? null, rawLastSeen]
           .filter((t): t is Date => t != null)
           .reduce<Date | null>((best, t) => (!best || t > best ? t : best), null);
 
@@ -453,7 +473,7 @@ hiveCoverageRouter.get(
       }
 
       for (const d of registryDevices) {
-        const mac        = d.currentMacAddress;
+        const mac        = d.currentMacAddress ? d.currentMacAddress.toUpperCase() : null;
         const rawMap     = mac ? rawByMac.get(mac) : undefined;
         const lastSeenAt = latestTimestamp(rawMap);
 
