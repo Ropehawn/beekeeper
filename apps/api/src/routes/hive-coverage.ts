@@ -135,6 +135,10 @@ function buildCoverageItem(
     return { key, label, covered: list.length > 0, devices: list.map(deviceEntry) };
   });
 
+  // allDevices: every sensor assigned to this hive, regardless of profile.
+  // The client uses this to show assigned sensors even when none cover a bucket.
+  const allDevices = hiveDevices.map(deviceEntry);
+
   return {
     hiveId:              hive.id,
     hiveName:            hive.name,
@@ -142,6 +146,7 @@ function buildCoverageItem(
     withoutProfileCount: hiveDevices.filter(d =>
       !d.deploymentProfile || d.deploymentProfile === "custom"
     ).length,
+    allDevices,
     buckets,
   };
 }

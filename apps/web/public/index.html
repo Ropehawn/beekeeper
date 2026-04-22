@@ -3782,11 +3782,32 @@
     const coveredCount = cov.buckets.filter(b => b.covered).length;
     const totalCount   = cov.buckets.length;
     const allGood      = coveredCount === totalCount;
+    const hasAnySensors = (cov.allDevices || []).length > 0;
     const statusColor  = allGood ? '#22c55e' : coveredCount === 0 ? '#ef4444' : '#f59e0b';
     const statusLabel  = allGood
       ? `All ${totalCount} covered`
       : `${coveredCount} / ${totalCount} covered`;
 
+    // Assigned sensors section — always shown when any sensors are assigned,
+    // so users can see their hardware even before deployment profiles are set.
+    let assignedSection = '';
+    if (hasAnySensors) {
+      const deviceChips = (cov.allDevices || []).map(d => {
+        const label = d.name || d.deviceId;
+        const sub   = d.deploymentProfile
+          ? `<span style="color:#64748b;font-size:9px;margin-left:4px;">${d.deploymentProfile.replace(/_/g,' ')}</span>`
+          : `<span style="color:#d97706;font-size:9px;margin-left:4px;">no profile</span>`;
+        return `<span style="display:inline-flex;align-items:center;background:#f1f5f9;border:1px solid #e2e8f0;border-radius:4px;padding:2px 6px;margin:2px;font-size:11px;color:#334155;">${label}${sub}</span>`;
+      }).join('');
+      assignedSection = `
+        <div style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #f0f0f0;">
+          <div style="font-size:10px;color:#888;font-weight:600;margin-bottom:4px;">ASSIGNED SENSORS</div>
+          <div style="flex-wrap:wrap;display:flex;">${deviceChips}</div>
+        </div>`;
+    }
+
+    // Bucket rows — "not covered by any sensor" rather than "no sensor assigned"
+    // when sensors exist but none cover that bucket.
     const rows = cov.buckets.map(b => {
       const indicator = b.covered
         ? `<span style="color:#22c55e;font-size:11px;font-weight:700;width:44px;flex-shrink:0;">✓ Yes</span>`
@@ -3802,10 +3823,12 @@
           const role = d.locationRole
             ? ` <span style="color:#64748b;font-size:10px;">· ${d.locationRole}</span>`
             : '';
-          return `<span style="color:#cbd5e1;">${name}</span>${id}${role}`;
-        }).join('<span style="color:#334155;margin:0 3px;">·</span>');
+          return `<span style="color:#374151;">${name}</span>${id}${role}`;
+        }).join('<span style="color:#cbd5e1;margin:0 3px;">·</span>');
+      } else if (hasAnySensors) {
+        detail = `<span style="color:#94a3b8;font-size:11px;font-style:italic;">Not covered — set a deployment profile</span>`;
       } else {
-        detail = `<span style="color:#475569;font-size:11px;font-style:italic;">No sensor assigned</span>`;
+        detail = `<span style="color:#94a3b8;font-size:11px;font-style:italic;">No sensor assigned</span>`;
       }
 
       return `
@@ -3816,17 +3839,15 @@
         </div>`;
     }).join('');
 
+    // Bottom hint
     let hint = '';
-    if (!allGood && cov.assignedCount === 0) {
-      hint = `<div style="font-size:10px;color:#888;margin-top:8px;font-style:italic;">
-        No sensors assigned to this hive yet.
-      </div>`;
+    if (!allGood && !hasAnySensors) {
+      hint = `<div style="font-size:10px;color:#888;margin-top:8px;font-style:italic;">No sensors assigned to this hive yet.</div>`;
     } else if (!allGood && cov.withoutProfileCount > 0) {
-      const noun   = cov.withoutProfileCount === 1 ? 'sensor' : 'sensors';
-      const plural  = cov.withoutProfileCount === 1 ? 'has' : 'have';
+      const noun = cov.withoutProfileCount === 1 ? 'sensor' : 'sensors';
       hint = `<div style="font-size:10px;color:#d97706;margin-top:8px;">
-        ⚠ ${cov.withoutProfileCount} ${noun} ${plural} no deployment profile —
-        <span style="cursor:pointer;text-decoration:underline;" onclick="nav('node-health')">open Node Health</span> to assign.
+        ⚠ ${cov.withoutProfileCount} ${noun} need a deployment profile to contribute coverage —
+        <span style="cursor:pointer;text-decoration:underline;" onclick="nav('node-health')">open Node Health</span>.
       </div>`;
     }
 
@@ -3836,6 +3857,7 @@
           <div class="card-title" style="margin:0;">📡 Sensor Coverage</div>
           <span style="font-size:11px;font-weight:600;color:${statusColor};">${statusLabel}</span>
         </div>
+        ${assignedSection}
         <div>${rows}</div>
         ${hint}
       </div>`;

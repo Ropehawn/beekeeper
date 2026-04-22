@@ -39,6 +39,8 @@ export interface HiveCoverageItem {
   assignedCount:        number;
   /** Sensors assigned but with no useful deploymentProfile (null or "custom") */
   withoutProfileCount:  number;
+  /** Every sensor assigned to this hive regardless of deploymentProfile */
+  allDevices:           CoverageDevice[];
   /** Ordered bucket array — iterate directly, do not hardcode bucket keys on the client */
   buckets:              CoverageBucket[];
 }
