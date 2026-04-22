@@ -28,6 +28,7 @@ import { hubObserveRouter } from "./routes/hub-observe";
 import { sensorIdentityQueueRouter } from "./routes/sensor-identity-queue";
 import { nodeHealthRouter } from "./routes/node-health";
 import { hiveCoverageRouter } from "./routes/hive-coverage";
+import { hiveIntelligenceRouter } from "./routes/hive-intelligence";
 import { camerasRouter } from "./routes/cameras";
 import { healthAnalysisRouter } from "./routes/health-analysis";
 import { getSchedulerStatus } from "./jobs/scheduler";
@@ -103,7 +104,8 @@ app.get("/health", async (_req, res) => {
 // API routes
 app.use("/api/v1/auth", authLimiter, authRouter);
 app.use("/api/v1/users", usersRouter);
-app.use("/api/v1/hives", hiveCoverageRouter); // must be before hivesRouter (/:id would swallow /coverage)
+app.use("/api/v1/hives", hiveCoverageRouter);    // before hivesRouter — avoids /:id swallowing /coverage, /status, /intelligence
+app.use("/api/v1/hives", hiveIntelligenceRouter); // before hivesRouter for same reason
 app.use("/api/v1/hives", hivesRouter);
 app.use("/api/v1/inspections", inspectionsRouter);
 app.use("/api/v1/feeding", feedingRouter);

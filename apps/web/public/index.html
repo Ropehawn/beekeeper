@@ -3396,7 +3396,7 @@
       location: 'N/A', status: 'pending', statusColor: '#9ca3af',
       healthScore: null, healthColor: '#9ca3af',
       queen: { seen: false, lastSeen: 'N/A', markColor: 'N/A', layingPattern: 'N/A', notes: 'No inspections recorded yet' },
-      sensorStatus: null,
+      intelligence: null,
       stats: [
         { label: 'Days Since Install', value: 'N/A', sub: 'Not yet installed' },
         { label: 'Frames Drawn', value: 'N/A', sub: 'No inspection data' },
@@ -3471,15 +3471,14 @@
     const realHiveId = _realHiveIds[id];
     if (realHiveId && BeeAPI.isLoggedIn()) {
       try {
-        const [inspections, feedings, varroaCounts, treatmentLogs, hiveAlerts, hiveScore, sensorData, sensorStatus] = await Promise.all([
+        const [inspections, feedings, varroaCounts, treatmentLogs, hiveAlerts, hiveScore, intelligence] = await Promise.all([
           BeeAPI.getInspections(realHiveId).catch(() => []),
           BeeAPI.getFeedingLogs(realHiveId).catch(() => []),
           BeeAPI.getVarroaCounts(realHiveId, 10).catch(() => []),
           BeeAPI.getTreatmentLogs(realHiveId, 10).catch(() => []),
           BeeAPI.getHiveAlerts(realHiveId).catch(() => []),
           BeeAPI.getHiveScore(realHiveId).catch(() => null),
-          BeeAPI.getLatestSensorReading(realHiveId).catch(() => null),
-          BeeAPI.getHiveSensorStatus(realHiveId).catch(() => null),
+          BeeAPI.getHiveIntelligence(realHiveId).catch(() => null),
         ]);
 
         // ── Replace inspections with real data ──
@@ -3715,9 +3714,9 @@
         // h.score already set above if hiveScore loaded; keep in sync
         if (!h.score) h.score = hiveScore || null;
 
-        // ── Apply sensor status ──
-        // sensors[] + gaps[] come from the server — nothing hardcoded on the client.
-        h.sensorStatus = sensorStatus || null;
+        // ── Apply hive intelligence ──
+        // conditions[], trends[], insights[], sources — all server-computed.
+        h.intelligence = intelligence || null;
 
       } catch (e) {
         console.warn('Failed to load hive detail data:', e.message);
@@ -3755,81 +3754,88 @@
   // Renders a compact bucket-coverage card for the hive detail page.
   // cov is the response from GET /api/v1/hives/coverage/:hiveId, or null on failure.
   // All labels and bucket keys come from cov.buckets — nothing is hardcoded here.
-  function renderSensorStatusSection(status) {
-    const STATUS_LABEL = { live: 'Live', stale: 'Stale', offline: 'Offline', no_data: 'No data' };
-    const STATUS_COLOR = { live: '#22c55e', stale: '#f59e0b', offline: '#9ca3af', no_data: '#9ca3af' };
+  function renderHiveIntelligence(intel) {
+    const FRESH_COLOR = { live: '#22c55e', stale: '#f59e0b', offline: '#9ca3af', unavailable: '#cbd5e1' };
+    const FRESH_LABEL = { live: 'Live', stale: 'Stale', offline: 'Offline', unavailable: 'Not assigned' };
+    const DIR_COLOR   = { up: '#22c55e', down: '#ef4444', stable: '#64748b' };
+    const DIR_SYMBOL  = { up: '+', down: '', stable: '' };
 
     function fmtAgo(sec) {
-      if (sec == null) return 'Never';
+      if (sec == null) return null;
       if (sec < 60)   return `${sec}s ago`;
       if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
       return `${Math.round(sec / 3600)}h ago`;
     }
 
-    if (!status) {
+    if (!intel) {
       return `<div class="card">
-        <div class="card-title" style="margin-bottom:8px;">Sensor Status</div>
+        <div class="card-title" style="margin-bottom:8px;">Hive Intelligence</div>
         <div style="font-size:12px;color:#9ca3af;">Unable to load sensor data.</div>
       </div>`;
     }
 
-    const { sensors, gaps } = status;
+    const { conditions, trends, insights, sources } = intel;
 
-    if (!sensors || sensors.length === 0) {
-      return `<div class="card">
-        <div class="card-title" style="margin-bottom:8px;">Sensor Status</div>
-        <div style="font-size:12px;color:#9ca3af;">No sensors assigned to this hive.</div>
-        ${gaps && gaps.length ? `<div style="margin-top:10px;">${gaps.map(g =>
-          `<div style="font-size:12px;color:#ef4444;margin-bottom:3px;">${g}</div>`
-        ).join('')}</div>` : ''}
-      </div>`;
-    }
+    // A — Conditions grid
+    const conditionsHtml = (conditions && conditions.length)
+      ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;">
+          ${conditions.map(c => {
+            const fc = FRESH_COLOR[c.freshness] || '#9ca3af';
+            const ago = fmtAgo(c.lastSeenAgo);
+            return `<div style="background:#f8fafc;border-radius:6px;padding:8px 10px;">
+              <div style="font-size:10px;color:#94a3b8;font-weight:600;letter-spacing:.04em;margin-bottom:3px;">${c.label.toUpperCase()}</div>
+              <div style="font-size:16px;font-weight:700;color:#1e293b;">${c.displayValue}</div>
+              ${ago ? `<div style="font-size:10px;color:${fc};margin-top:2px;">${ago}</div>` : ''}
+            </div>`;
+          }).join('')}
+        </div>`
+      : '';
 
-    const sensorRows = sensors.map(s => {
-      const meta = [s.profileLabel, s.locationRoleLabel].filter(Boolean).join('  ·  ');
-      const statusColor = STATUS_COLOR[s.liveStatus] || '#9ca3af';
-      const statusLabel = STATUS_LABEL[s.liveStatus] || s.liveStatus;
+    // B — Trends
+    const trendsHtml = (trends && trends.length)
+      ? `<div style="margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #f1f5f9;">
+          <div style="font-size:10px;font-weight:600;color:#94a3b8;letter-spacing:.05em;margin-bottom:6px;">TRENDS</div>
+          ${trends.map(t => {
+            const dc = DIR_COLOR[t.direction] || '#64748b';
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;">
+              <span style="font-size:12px;color:#475569;">${t.label}</span>
+              <span style="font-size:13px;font-weight:600;color:${dc};">${t.displayValue}</span>
+            </div>`;
+          }).join('')}
+        </div>`
+      : '';
 
-      const readingsHtml = s.readings && s.readings.length
-        ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:16px;">
-            ${s.readings.map(r =>
-              `<span style="font-size:12px;color:#1e293b;">
-                <span style="color:#64748b;font-size:11px;">${r.label}:</span> ${r.displayValue}
-              </span>`
-            ).join('')}
-          </div>`
-        : `<div style="margin-top:5px;font-size:11px;color:#9ca3af;">No readings in the last 24 hours.</div>`;
+    // C — Insights
+    const insightsHtml = (insights && insights.length)
+      ? `<div style="margin-bottom:14px;">
+          <div style="font-size:10px;font-weight:600;color:#94a3b8;letter-spacing:.05em;margin-bottom:6px;">WHAT IT MEANS</div>
+          ${insights.map(s => `<div style="font-size:12px;color:#334155;padding:3px 0;border-bottom:1px solid #f8fafc;">${s}</div>`).join('')}
+        </div>`
+      : '';
 
-      return `
-        <div style="padding:10px 0;border-bottom:1px solid #f1f5f9;">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-            <div>
-              <div style="font-size:13px;font-weight:600;color:#1e293b;">${s.name}</div>
-              <div style="font-size:11px;color:#64748b;margin-top:2px;">
-                ${s.deviceId}${meta ? '  ·  ' + meta : ''}
-              </div>
-            </div>
-            <div style="text-align:right;flex-shrink:0;">
-              <div style="font-size:12px;font-weight:600;color:${statusColor};">${statusLabel}</div>
-              <div style="font-size:10px;color:#9ca3af;margin-top:1px;">${fmtAgo(s.lastSeenAgo)}</div>
-            </div>
-          </div>
-          ${readingsHtml}
-        </div>`;
-    }).join('');
-
-    const gapsHtml = gaps && gaps.length
-      ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid #f1f5f9;">
-          <div style="font-size:10px;font-weight:600;color:#9ca3af;letter-spacing:.05em;margin-bottom:5px;">MISSING</div>
-          ${gaps.map(g => `<div style="font-size:12px;color:#ef4444;margin-bottom:3px;">${g}</div>`).join('')}
+    // D — Source confidence footnote
+    const sourceOrder = ['internalClimate', 'externalClimate', 'scale', 'audio'];
+    const sourceNames = { internalClimate: 'Internal', externalClimate: 'External', scale: 'Scale', audio: 'Audio' };
+    const sourceFooter = sources
+      ? `<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:4px;">
+          ${sourceOrder.map(k => {
+            const s = sources[k];
+            if (!s) return '';
+            const fc = FRESH_COLOR[s.freshness] || '#9ca3af';
+            const fl = FRESH_LABEL[s.freshness] || s.freshness;
+            const ago = fmtAgo(s.lastSeenAgo);
+            return `<span style="font-size:10px;color:#94a3b8;">${sourceNames[k]}: <span style="color:${fc};font-weight:600;">${fl}</span>${ago ? ` · ${ago}` : ''}</span>`;
+          }).join('')}
         </div>`
       : '';
 
     return `
       <div class="card">
-        <div class="card-title" style="margin-bottom:4px;">Sensor Status</div>
-        ${sensorRows}
-        ${gapsHtml}
+        <div class="card-title" style="margin-bottom:12px;">Hive Intelligence</div>
+        ${conditionsHtml}
+        ${trendsHtml}
+        ${insightsHtml}
+        ${sourceFooter}
       </div>`;
   }
 
@@ -3903,8 +3909,8 @@
             </div>
           </div>
 
-          <!-- Sensor Status — per-sensor live data, readings, and gap summary -->
-          ${renderSensorStatusSection(h.sensorStatus || null)}
+          <!-- Hive Intelligence — conditions, trends, insights, source confidence -->
+          ${renderHiveIntelligence(h.intelligence || null)}
         </div>
 
         <div style="display:flex;flex-direction:column;gap:12px;">
