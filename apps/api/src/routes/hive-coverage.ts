@@ -109,7 +109,7 @@ hiveCoverageRouter.get(
   requireRole("queen", "worker"),
   async (req, res) => {
     try {
-      const { hiveId } = req.params;
+      const hiveId = String(req.params.hiveId);
       const hive = await db.hive.findUnique({
         where:  { id: hiveId },
         select: { id: true, name: true, status: true },
@@ -119,7 +119,7 @@ hiveCoverageRouter.get(
       }
       const devices = await fetchDevicesForHives([hiveId]);
       return res.json(buildCoverageItem(hive, devices));
-    } catch {
+    } catch (err) {
       return res.status(500).json({ error: "Failed to load hive coverage" });
     }
   },
