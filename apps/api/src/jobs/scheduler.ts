@@ -14,6 +14,7 @@
 import cron from "node-cron";
 import { runAlertNotifications } from "./alert-notifications";
 import { runSensorPolling } from "./sensor-polling";
+import { runHubHealthMonitor } from "./hub-health-monitor";
 import { logger } from "../lib/logger";
 
 // ── Observability ─────────────────────────────────────────────────────────────
@@ -26,6 +27,7 @@ interface LastRun {
 
 let _lastRun: LastRun = { at: null, status: null, error: null };
 let _lastSensorRun: LastRun = { at: null, status: null, error: null };
+let _lastHubHealthRun: LastRun = { at: null, status: null, error: null };
 
 /** Returns a snapshot of the last cron execution for the /health/scheduler endpoint. */
 export function getSchedulerStatus() {
@@ -40,6 +42,12 @@ export function getSchedulerStatus() {
       lastRunStatus: _lastSensorRun.status,
       lastRunError:  _lastSensorRun.error,
       schedule:      "every 15 minutes",
+    },
+    hubHealthMonitor: {
+      lastRunAt:     _lastHubHealthRun.at?.toISOString() ?? null,
+      lastRunStatus: _lastHubHealthRun.status,
+      lastRunError:  _lastHubHealthRun.error,
+      schedule:      "every 5 minutes",
     },
   };
 }
@@ -108,11 +116,34 @@ if (process.env.DISABLE_SCHEDULER) {
     }
   }, { timezone: "UTC" });
 
+  // ── Hub Health Monitor ──────────────────────────────────────────────────────
+  // Runs every 5 minutes. Alerts if any hub has gone silent/offline.
+  // Dedupes via email_log (4h cooldown per hub/state).
+
+  const _hubHealthTask = cron.schedule("*/5 * * * *", async () => {
+    const job = "hub-health-monitor";
+    const startMs = Date.now();
+    logger.debug({ job }, "Cron job started");
+    try {
+      await Promise.race([runHubHealthMonitor(), withTimeout(JOB_TIMEOUT_MS)]);
+      const duration_ms = Date.now() - startMs;
+      _lastHubHealthRun = { at: new Date(), status: "ok", error: null };
+      logger.debug({ job, duration_ms }, "Cron job completed");
+    } catch (err) {
+      const duration_ms = Date.now() - startMs;
+      const msg    = err instanceof Error ? err.message : String(err);
+      const status = msg.startsWith("Job timed out") ? "timeout" : "error";
+      _lastHubHealthRun = { at: new Date(), status, error: msg };
+      logger.error({ job, duration_ms, err: msg }, "Cron job failed");
+    }
+  }, { timezone: "UTC" });
+
   // ── Graceful shutdown ───────────────────────────────────────────────────────
   function _stopScheduler(signal: string) {
     logger.info({ signal }, "Scheduler received signal — stopping cron tasks");
     _task.stop();
     _sensorTask.stop();
+    _hubHealthTask.stop();
   }
 
   process.on("SIGTERM", () => _stopScheduler("SIGTERM"));
@@ -120,4 +151,5 @@ if (process.env.DISABLE_SCHEDULER) {
 
   logger.info({ job: "alert-notifications", schedule: "0 8 * * * UTC" }, "Cron job registered");
   logger.info({ job: "sensor-polling", schedule: "*/15 * * * * UTC" }, "Cron job registered");
+  logger.info({ job: "hub-health-monitor", schedule: "*/5 * * * * UTC" }, "Cron job registered");
 }

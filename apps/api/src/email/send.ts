@@ -222,3 +222,88 @@ export async function sendPasswordResetEmail(to: string, name: string, resetUrl:
     template: "password-reset",
   });
 }
+
+// ── Hub Health Alert ─────────────────────────────────────────────────────────
+
+export interface HubHealthAlertParams {
+  to: string;
+  recipientUserId: string;
+  recipientName: string;
+  hubName: string;
+  hubId: string;
+  /** "silent" — hub responsive but scanner stalled; "offline" — no heartbeat. */
+  state: "silent" | "offline";
+  heartbeatAgeMin: number | null;
+  readingAgeMin: number | null;
+}
+
+/**
+ * Alerts an operator that a Tachyon hub has stopped reporting.
+ * `silent` means the hub process is alive and sending heartbeats but its BLE
+ * scanner isn't ingesting readings — distinguishes a software/BlueZ fault
+ * from a full hub outage.
+ */
+export async function sendHubHealthAlert(p: HubHealthAlertParams) {
+  const severity = p.state === "offline" ? "🔴 offline" : "⚠️ scanner stalled";
+  const humanState =
+    p.state === "offline"
+      ? "is not reporting a heartbeat — the hub process or its network link is down"
+      : "is alive but its BLE scanner has stopped producing readings";
+
+  const heartbeatLine =
+    p.heartbeatAgeMin === null
+      ? "never"
+      : `${p.heartbeatAgeMin} min ago`;
+  const readingLine =
+    p.readingAgeMin === null
+      ? "never"
+      : `${p.readingAgeMin} min ago`;
+
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:0 auto;padding:40px 20px;">
+      <h2 style="color:#1e293b;margin-bottom:8px;">Hub health alert: ${severity}</h2>
+      <p style="color:#475569;">Hi ${escapeHtml(p.recipientName)},</p>
+      <p style="color:#475569;">Your Tachyon hub <strong>${escapeHtml(p.hubName)}</strong> ${humanState}.</p>
+      <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+        <tr>
+          <td style="padding:6px 12px;color:#64748b;font-size:13px;border-bottom:1px solid #f1f5f9;">Last heartbeat</td>
+          <td style="padding:6px 12px;color:#0f172a;font-size:13px;text-align:right;border-bottom:1px solid #f1f5f9;">${heartbeatLine}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 12px;color:#64748b;font-size:13px;border-bottom:1px solid #f1f5f9;">Last reading ingested</td>
+          <td style="padding:6px 12px;color:#0f172a;font-size:13px;text-align:right;border-bottom:1px solid #f1f5f9;">${readingLine}</td>
+        </tr>
+        <tr>
+          <td style="padding:6px 12px;color:#64748b;font-size:13px;">Hub ID</td>
+          <td style="padding:6px 12px;color:#0f172a;font-size:12px;font-family:monospace;text-align:right;">${escapeHtml(p.hubId)}</td>
+        </tr>
+      </table>
+      <p style="color:#475569;font-size:14px;">Likely next step:</p>
+      <ul style="color:#475569;font-size:14px;">
+        <li>SSH into the hub and run <code style="background:#f1f5f9;padding:2px 6px;border-radius:3px;">sudo systemctl status beekeeper-hub-py</code></li>
+        <li>If the service is failing, <code style="background:#f1f5f9;padding:2px 6px;border-radius:3px;">sudo systemctl restart beekeeper-hub-py</code></li>
+        <li>Tail logs: <code style="background:#f1f5f9;padding:2px 6px;border-radius:3px;">sudo journalctl -u beekeeper-hub-py -f</code></li>
+      </ul>
+      <p style="color:#94a3b8;font-size:12px;margin-top:32px;">You won't get another alert for this hub/state within the next 4 hours.</p>
+    </div>
+  `;
+
+  const subject =
+    p.state === "offline"
+      ? `🔴 Hub offline — ${p.hubName}`
+      : `⚠️ Hub scanner stalled — ${p.hubName}`;
+
+  return sendEmail({
+    to: p.to,
+    subject,
+    html,
+    template: "hub-health-alert",
+    recipientUserId: p.recipientUserId,
+    metadata: {
+      hubId: p.hubId,
+      state: p.state,
+      heartbeatAgeMin: p.heartbeatAgeMin,
+      readingAgeMin: p.readingAgeMin,
+    },
+  });
+}
