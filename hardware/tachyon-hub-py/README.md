@@ -82,9 +82,38 @@ cd ~/beekeeper-ai
 
 ### Under systemd (production)
 
-A unit file lives at `./systemd/beekeeper-hub-py.service` — see that file
-for install instructions. Once enabled, `systemctl status beekeeper-hub-py`
-and `journalctl -u beekeeper-hub-py -f` give you state and live logs.
+Unit file: `./systemd/beekeeper-hub-py.service`
+
+Install once per hub:
+
+```sh
+sudo cp ./systemd/beekeeper-hub-py.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now beekeeper-hub-py
+sudo systemctl status beekeeper-hub-py
+```
+
+Operate:
+
+```sh
+# Live logs
+sudo journalctl -u beekeeper-hub-py -f
+
+# Restart after updating source in ~/beekeeper-ai/
+sudo systemctl restart beekeeper-hub-py
+
+# Check restart history (should stay low — bursts indicate trouble)
+sudo systemctl show beekeeper-hub-py -p NRestarts
+```
+
+The unit has `Restart=always` with `RestartSec=10` and a rate-limit of 5
+restarts per 10 minutes. `After=bluetooth.service network-online.target`
+holds service start until BlueZ and the network are up at boot.
+
+Verified behaviors (2026-04-23):
+- `systemctl restart bluetooth` — daemon survives without restarting
+- `kill -9` of daemon PID — systemd respawns after 10s
+- Clean boot — daemon comes up after bluetooth + network are online
 
 ## Known quirks
 

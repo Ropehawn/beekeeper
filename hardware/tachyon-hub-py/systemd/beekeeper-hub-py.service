@@ -1,0 +1,26 @@
+[Unit]
+Description=BeeKeeper Tachyon BLE ingestion daemon (Python)
+Documentation=https://github.com/Ropehawn/beekeeper/tree/main/hardware/tachyon-hub-py
+After=bluetooth.service network-online.target
+Wants=bluetooth.service network-online.target
+# Prevent rapid respawn loops: 5 restarts in 10 minutes max
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=particle
+Group=particle
+WorkingDirectory=/home/particle/beekeeper-ai
+ExecStart=/home/particle/beekeeper-ai/bin/python ble_ingestion_daemon.py
+Restart=always
+RestartSec=10
+# Ensure Python prints arrive in journald promptly
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+# Give the daemon a moment to shut down cleanly before SIGKILL
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
