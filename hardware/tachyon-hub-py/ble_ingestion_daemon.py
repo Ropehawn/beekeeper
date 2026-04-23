@@ -14,6 +14,7 @@ Runs as a systemd service on the Tachyon hub.
 import asyncio
 import json
 import struct
+import sys
 import time
 import logging
 import urllib.request
@@ -279,13 +280,52 @@ class BLEIngestionDaemon:
         except Exception as e:
             log.error(f"Upload failed: {e}")
 
+    # Consecutive scan failures before we give up and let systemd restart us
+    # with a fresh BlueZ connection. At scan_interval=60s, 3 failures = ~3 min
+    # of in-process retries, which is enough to ride through a bluetoothd
+    # restart but short enough to not sit dead for hours if something is truly
+    # broken. Prior incident (Apr 21-22) had the daemon error-looping for
+    # 16+ hours with no recovery.
+    MAX_CONSECUTIVE_SCAN_FAILURES = 3
+
+    @staticmethod
+    def _is_dbus_error(exc) -> bool:
+        """
+        Heuristic: does this exception look like a BlueZ/D-Bus disconnect
+        rather than a transient scan hiccup? We want to be conservative —
+        false positives just mean we exit and systemd restarts us (cheap);
+        false negatives mean we sit in a broken state (expensive).
+        """
+        msg = str(exc)
+        markers = (
+            "D-Bus", "DBus", "dbus",
+            "AccessDenied",
+            "org.freedesktop",
+            "org.bluez",
+            "ServiceUnknown",
+            "NotConnected",
+            "not connected",
+            "Connection reset",
+        )
+        return any(m in msg for m in markers)
+
     def run(self):
-        """Main loop: scan → buffer → upload."""
+        """Main loop: scan → buffer → upload. Exits after MAX_CONSECUTIVE_SCAN_FAILURES
+        so systemd can respawn with a clean D-Bus/BlueZ connection."""
         log.info("Starting BLE ingestion daemon")
+        consecutive_failures = 0
 
         while True:
             try:
                 sensors = self.scan_ble(timeout=10)
+
+                # Successful scan — clear failure streak and announce recovery if any.
+                if consecutive_failures > 0:
+                    log.info(
+                        f"Recovered after {consecutive_failures} consecutive "
+                        f"scan failure(s) — BlueZ connection is healthy"
+                    )
+                    consecutive_failures = 0
 
                 if sensors:
                     sc833f_count = sum(1 for s in sensors.values() if s["sensor_type"] == "sc833f")
@@ -312,7 +352,19 @@ class BLEIngestionDaemon:
                     self.upload_readings()
                 break
             except Exception as e:
-                log.error(f"Error in main loop: {e}")
+                consecutive_failures += 1
+                tag = " [D-Bus/BlueZ]" if self._is_dbus_error(e) else ""
+                log.error(
+                    f"Scan failed (#{consecutive_failures}/"
+                    f"{self.MAX_CONSECUTIVE_SCAN_FAILURES}){tag}: {e}"
+                )
+                if consecutive_failures >= self.MAX_CONSECUTIVE_SCAN_FAILURES:
+                    log.error(
+                        f"Reached {self.MAX_CONSECUTIVE_SCAN_FAILURES} consecutive "
+                        f"failures — exiting so systemd can respawn us with a "
+                        f"fresh BlueZ connection."
+                    )
+                    sys.exit(1)
 
             time.sleep(self.scan_interval)
 
