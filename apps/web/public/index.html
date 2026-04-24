@@ -5775,32 +5775,7 @@
     'bottom-board':     { label:'Bottom Board',     color:'#1e293b', h:10, w:210, removable:false, toggleable:false },
   };
 
-  let apiaryHiveData = {
-    1: {
-      name:'Hive 1', breed:'Buckfast', source:'Mann Lake Ltd', order:'#816651',
-      installDate:'2026-04-18', status:'active', location:'Lot 2 · Stonewall East',
-      components:[
-        {type:'outer-cover'},
-        {type:'inner-cover'},
-        {type:'top-feeder', note:'10-Frame Painted Super'},
-        {type:'brood-box', frames:10, note:'Deep · 9⅛" Black Frames'},
-        {type:'entrance-reducer', state:'Reduced'},
-        {type:'bottom-board'},
-      ]
-    },
-    2: {
-      name:'Hive 2', breed:'Buckfast', source:'Mann Lake Ltd', order:'#816651',
-      installDate:'2026-04-18', status:'monitor', location:'Lot 2 · Stonewall East',
-      components:[
-        {type:'outer-cover'},
-        {type:'inner-cover'},
-        {type:'top-feeder', note:'10-Frame Painted Super'},
-        {type:'brood-box', frames:10, note:'Deep · 9⅛" Black Frames'},
-        {type:'entrance-reducer', state:'Reduced'},
-        {type:'bottom-board'},
-      ]
-    }
-  };
+  let apiaryHiveData = {};
 
   let apEditing   = null;  // hive id currently being edited
   let apEditComps = null;  // deep copy of components being edited
@@ -7645,12 +7620,14 @@
     try {
       // Load hives + components from real API
       const hives = await BeeAPI.getHives();
-      if (hives && hives.length > 0) {
-        // Clear mock data and rebuild from API
+      if (hives) {
+        // Clear mock data — always replace with API response (even if empty)
         apiaryHiveData = {};
         _realHiveIds = {};
         _realCompIds = {};
         _realFrameIds = {};
+      }
+      if (hives && hives.length > 0) {
 
         // Ensure hiveData has entries for all hives (dynamic, not hardcoded to 2)
         hives.forEach((_h, idx) => {
