@@ -1,0 +1,35 @@
+// Grant the `particle` user unrestricted access to BlueZ adapter and device
+// operations needed by the BeeKeeper hub daemon.
+//
+// Pair this with /etc/dbus-1/system.d/beekeeper-hub-bluetooth.conf — the
+// D-Bus policy lets the user *connect* to org.bluez at all, this polkit
+// rule lets them *call privileged actions* like StartDiscovery and
+// ConnectDevice on the adapter.
+//
+// Install on each hub:
+//   sudo cp hardware/tachyon-hub-py/polkit/50-beekeeper-bluetooth.rules \
+//           /etc/polkit-1/rules.d/
+//   sudo cp hardware/tachyon-hub-py/dbus/beekeeper-hub-bluetooth.conf \
+//           /etc/dbus-1/system.d/
+//   sudo systemctl restart bluetooth
+//   # Then change User=root → User=particle in the systemd unit.
+//
+// To verify after install (as the particle user):
+//   /home/particle/beekeeper-ai/bin/python -c "
+//   import asyncio; from bleak import BleakScanner
+//   asyncio.run(BleakScanner.discover(timeout=3))
+//   "
+// Should return without raising AccessDenied.
+
+polkit.addRule(function(action, subject) {
+    // Match every action under the org.bluez namespace
+    // (Adapter1.StartDiscovery, Device1.Connect, etc.)
+    if (action.id.indexOf("org.bluez.") === 0 && subject.user === "particle") {
+        return polkit.Result.YES;
+    }
+    // Fallback: any user in the `bluetooth` system group, if one is created
+    // later. Cheap to leave in — group is empty by default on Ubuntu 24.04.
+    if (action.id.indexOf("org.bluez.") === 0 && subject.isInGroup("bluetooth")) {
+        return polkit.Result.YES;
+    }
+});

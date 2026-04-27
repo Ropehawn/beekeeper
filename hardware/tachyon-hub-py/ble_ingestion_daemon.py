@@ -129,13 +129,20 @@ class BLEIngestionDaemon:
         self.readings_buffer = []
         self.scan_interval = self.config.get("scanIntervalSec", 60)
         self.upload_interval = self.config.get("uploadIntervalSec", 300)
+        self.heartbeat_interval = self.config.get("heartbeatIntervalSec", 300)  # 5 min
         self.last_upload = time.time()
+        self.last_heartbeat = 0  # force first heartbeat on startup
+        self.boot_time = time.time()
         self.mac_to_device_id = {}  # MAC (upper) → sensor_devices.id (UUID)
         self.last_cache_refresh = 0
         self.cache_refresh_interval = 600  # refresh device map every 10 min
         log.info(f"Hub: {self.config['hubName']} ({self.config['hubId']})")
         log.info(f"API: {self.config['apiUrl']}")
-        log.info(f"Scan every {self.scan_interval}s, upload every {self.upload_interval}s")
+        log.info(
+            f"Scan every {self.scan_interval}s, "
+            f"upload every {self.upload_interval}s, "
+            f"heartbeat every {self.heartbeat_interval}s"
+        )
         self.refresh_device_cache()
 
     def scan_ble(self, timeout=10):
@@ -250,6 +257,45 @@ class BLEIngestionDaemon:
                         {**base, "metric": metric, "value": s[metric], "unit": unit}
                     )
 
+    def send_heartbeat(self):
+        """POST /api/v1/hubs/heartbeat with diagnostics so the API knows we're alive.
+        Quiet on success, logs at WARNING on failure (heartbeat failure is
+        worth knowing about but never fatal — if the API is down we keep
+        scanning and try again next cycle)."""
+        url = f"{self.config['apiUrl']}/api/v1/hubs/heartbeat"
+        payload = {
+            "uptimeSec": int(time.time() - self.boot_time),
+        }
+        # Best-effort CPU temp (Linux thermal zone 0). Skip if not readable.
+        try:
+            with open("/sys/class/thermal/thermal_zone0/temp") as f:
+                payload["cpuTempC"] = int(f.read().strip()) / 1000.0
+        except Exception:
+            pass
+        # Best-effort free disk space on the home filesystem.
+        try:
+            import shutil
+            free_bytes = shutil.disk_usage(str(Path.home())).free
+            payload["storageFreeGb"] = round(free_bytes / (1024 ** 3), 2)
+        except Exception:
+            pass
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Key": self.config["apiKey"],
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp.read()
+                self.last_heartbeat = time.time()
+        except Exception as e:
+            log.warning(f"Heartbeat failed: {e}")
+
     def upload_readings(self):
         """Upload buffered readings to the BeeKeeper API."""
         if not self.readings_buffer:
@@ -344,6 +390,9 @@ class BLEIngestionDaemon:
 
                 if time.time() - self.last_upload >= self.upload_interval:
                     self.upload_readings()
+
+                if time.time() - self.last_heartbeat >= self.heartbeat_interval:
+                    self.send_heartbeat()
 
             except KeyboardInterrupt:
                 log.info("Shutting down...")
