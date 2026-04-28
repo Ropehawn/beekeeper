@@ -231,24 +231,36 @@ export interface HubHealthAlertParams {
   recipientName: string;
   hubName: string;
   hubId: string;
-  /** "silent" — hub responsive but scanner stalled; "offline" — no heartbeat. */
-  state: "silent" | "offline";
+  /**
+   * - "silent" — hub responsive but scanner stalled
+   * - "offline" — no heartbeat
+   * - "overheating" — heartbeat fresh, scans flowing, CPU temp > warn threshold
+   */
+  state: "silent" | "offline" | "overheating";
   heartbeatAgeMin: number | null;
   readingAgeMin: number | null;
+  lastCpuTempC?: number | null;
 }
 
 /**
  * Alerts an operator that a Tachyon hub has stopped reporting.
  * `silent` means the hub process is alive and sending heartbeats but its BLE
  * scanner isn't ingesting readings — distinguishes a software/BlueZ fault
- * from a full hub outage.
+ * from a full hub outage. `overheating` means everything is flowing but the
+ * SoC is approaching the throttle threshold (~70°C), usually because the
+ * IP67 enclosure has gotten too hot in direct sun.
  */
 export async function sendHubHealthAlert(p: HubHealthAlertParams) {
-  const severity = p.state === "offline" ? "🔴 offline" : "⚠️ scanner stalled";
+  const severity =
+    p.state === "offline"     ? "🔴 offline"
+    : p.state === "silent"    ? "⚠️ scanner stalled"
+    :                           "🌡️ overheating";
   const humanState =
     p.state === "offline"
       ? "is not reporting a heartbeat — the hub process or its network link is down"
-      : "is alive but its BLE scanner has stopped producing readings";
+      : p.state === "silent"
+      ? "is alive but its BLE scanner has stopped producing readings"
+      : `is running at ${p.lastCpuTempC?.toFixed(1) ?? "?"}°C — the Qualcomm SoC throttles around 70°C and shuts down above that. Likely the IP67 enclosure is in direct sun or has lost airflow`;
 
   const heartbeatLine =
     p.heartbeatAgeMin === null
@@ -289,9 +301,9 @@ export async function sendHubHealthAlert(p: HubHealthAlertParams) {
   `;
 
   const subject =
-    p.state === "offline"
-      ? `🔴 Hub offline — ${p.hubName}`
-      : `⚠️ Hub scanner stalled — ${p.hubName}`;
+    p.state === "offline"     ? `🔴 Hub offline — ${p.hubName}`
+    : p.state === "silent"    ? `⚠️ Hub scanner stalled — ${p.hubName}`
+    :                           `🌡️ Hub overheating (${p.lastCpuTempC?.toFixed(1) ?? "?"}°C) — ${p.hubName}`;
 
   return sendEmail({
     to: p.to,

@@ -28,8 +28,12 @@ import { logger } from "../lib/logger";
 const HEARTBEAT_STALE_MIN   = 15;     // no heartbeat this long → offline
 const READINGS_STALE_MIN    = 15;     // no readings this long while alive → silent
 const ALERT_COOLDOWN_HOURS  = 4;      // suppress duplicate alerts inside this window
+// CPU temp thresholds. Tachyon SoC throttles around 70°C and shuts down
+// at +70°C per the datasheet; alert before we get into throttle territory.
+const CPU_TEMP_WARN_C       = 65;     // alert above this
+const CPU_TEMP_RECOVER_C    = 60;     // suppress repeat alerts until below this
 
-type HealthState = "ok" | "silent" | "offline";
+type HealthState = "ok" | "silent" | "offline" | "overheating";
 
 interface HubHealth {
   hubId:        string;
@@ -39,6 +43,7 @@ interface HubHealth {
   lastReadingAt:   Date | null;
   heartbeatAgeMin: number | null;   // null = never
   readingAgeMin:   number | null;
+  lastCpuTempC:    number | null;
 }
 
 // ── Health classification ────────────────────────────────────────────────────
@@ -46,6 +51,7 @@ interface HubHealth {
 function classify(h: {
   lastHeartbeatAt: Date | null;
   lastReadingAt:   Date | null;
+  lastCpuTempC:    number | null;
   now: Date;
 }): HealthState {
   const hbAgeMin = h.lastHeartbeatAt
@@ -58,6 +64,12 @@ function classify(h: {
     : Infinity;
   if (rAgeMin > READINGS_STALE_MIN) return "silent";
 
+  // Heartbeat fresh, readings flowing — but is the SoC overheating?
+  // Tachyon throttles ~70°C; warn before we get there.
+  if (h.lastCpuTempC !== null && h.lastCpuTempC >= CPU_TEMP_WARN_C) {
+    return "overheating";
+  }
+
   return "ok";
 }
 
@@ -65,7 +77,7 @@ function classify(h: {
 
 async function alreadyAlertedRecently(
   hubId: string,
-  state: HealthState,
+  state: Exclude<HealthState, "ok">,
 ): Promise<boolean> {
   const cutoff = new Date(Date.now() - ALERT_COOLDOWN_HOURS * 60 * 60 * 1_000);
   const recent = await db.emailLog.findFirst({
@@ -96,6 +108,7 @@ export async function runHubHealthMonitor(): Promise<void> {
       id:              true,
       name:            true,
       lastHeartbeat:   true,
+      lastCpuTempC:    true,
     },
   });
 
@@ -122,6 +135,7 @@ export async function runHubHealthMonitor(): Promise<void> {
     const state = classify({
       lastHeartbeatAt: h.lastHeartbeat,
       lastReadingAt,
+      lastCpuTempC: h.lastCpuTempC,
       now,
     });
     return {
@@ -136,19 +150,21 @@ export async function runHubHealthMonitor(): Promise<void> {
       readingAgeMin: lastReadingAt
         ? Math.round((now.getTime() - lastReadingAt.getTime()) / 60_000)
         : null,
+      lastCpuTempC: h.lastCpuTempC,
     };
   });
 
-  const okCount     = states.filter((s) => s.state === "ok").length;
-  const silentCount = states.filter((s) => s.state === "silent").length;
-  const offlineCount = states.filter((s) => s.state === "offline").length;
+  const okCount         = states.filter((s) => s.state === "ok").length;
+  const silentCount     = states.filter((s) => s.state === "silent").length;
+  const offlineCount    = states.filter((s) => s.state === "offline").length;
+  const overheatCount   = states.filter((s) => s.state === "overheating").length;
   logger.info(
-    { ok: okCount, silent: silentCount, offline: offlineCount, total: states.length },
+    { ok: okCount, silent: silentCount, offline: offlineCount, overheating: overheatCount, total: states.length },
     "hub-health-monitor: classified hubs",
   );
 
   // Short-circuit: no alerts to send + no email provider → done.
-  if (silentCount === 0 && offlineCount === 0) return;
+  if (silentCount === 0 && offlineCount === 0 && overheatCount === 0) return;
   if (!process.env.RESEND_API_KEY) {
     logger.warn({}, "hub-health-monitor: unhealthy hub(s) but RESEND_API_KEY is unset — no email sent");
     return;
@@ -166,7 +182,8 @@ export async function runHubHealthMonitor(): Promise<void> {
 
   for (const hub of states) {
     if (hub.state === "ok") continue;
-    if (await alreadyAlertedRecently(hub.hubId, hub.state)) {
+    const alertState = hub.state;  // narrowed by the guard above
+    if (await alreadyAlertedRecently(hub.hubId, alertState)) {
       logger.debug(
         { hubId: hub.hubId, state: hub.state },
         "hub-health-monitor: alert suppressed (cooldown)",
@@ -182,9 +199,10 @@ export async function runHubHealthMonitor(): Promise<void> {
           recipientName:    user.name ?? user.email,
           hubName:          hub.hubName,
           hubId:            hub.hubId,
-          state:            hub.state,
+          state:            hub.state as "silent" | "offline" | "overheating",
           heartbeatAgeMin:  hub.heartbeatAgeMin,
           readingAgeMin:    hub.readingAgeMin,
+          lastCpuTempC:     hub.lastCpuTempC,
         });
         logger.info(
           { hubId: hub.hubId, state: hub.state, to: user.id },
