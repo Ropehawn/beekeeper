@@ -9,25 +9,19 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-# Runs as root for unrestricted D-Bus access to org.bluez. On Ubuntu 24.04 a
-# non-root user (even with the dbus policy in ./dbus/) hits
-# "org.freedesktop.DBus.Error.AccessDenied Client tried to send a message
-# other than Hello without being registered" at bleak's scan init. Proper
-# fix is a polkit rule + BlueZ group setup — tracked separately. Config file
-# at /home/particle/beekeeper-ai/hub-config.json has mode 0600 owned by
-# particle, which root can still read.
-User=root
-Group=root
+# Runs as `particle` (non-root) — verified working 2026-04-27 once both the
+# D-Bus policy (./dbus/beekeeper-hub-bluetooth.conf) and the polkit rule
+# (./polkit/50-beekeeper-bluetooth.rules) are installed. The earlier root
+# fallback was needed because bleak hit "AccessDenied / not registered"
+# at scan init without those two pieces.
+User=particle
+Group=particle
 WorkingDirectory=/home/particle/beekeeper-ai
 ExecStart=/home/particle/beekeeper-ai/bin/python ble_ingestion_daemon.py
 Restart=always
 RestartSec=10
 # Ensure Python prints arrive in journald promptly
 Environment=PYTHONUNBUFFERED=1
-# The daemon uses Path.home() to locate hub-config.json. Even running as root
-# we want it to read from /home/particle/beekeeper-ai/, where the venv and
-# runtime state actually live.
-Environment=HOME=/home/particle
 StandardOutput=journal
 StandardError=journal
 # Give the daemon a moment to shut down cleanly before SIGKILL
