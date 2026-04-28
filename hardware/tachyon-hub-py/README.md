@@ -14,6 +14,7 @@ payloads, batches readings, and uploads to the BeeKeeper API.
 |---|---|
 | `ble_ingestion_daemon.py` | Main BLE daemon — scan + parse + batch + upload + heartbeat |
 | `camera_capture.py` | CSI camera capture daemon — IMX519 stills, R2 upload via API |
+| `m1_panel.py` | M1 enclosure front RGB LED + user button driver |
 | `provision_sensor.py` | CLI tool for per-sensor provisioning (`--c6` for ESP32-C6, default for SC833F) |
 | `provision_web.py` | Local web UI (port 5050) for provisioning from a phone |
 | `raw_hci_scan.py` | One-shot BLE advertisement dumper for debugging |
@@ -83,25 +84,43 @@ cd ~/beekeeper-ai
 
 ### Under systemd (production)
 
-Two units, one per daemon:
+Three units, one per daemon:
 
 - `./systemd/beekeeper-hub-py.service` — BLE ingestion (sensors)
 - `./systemd/beekeeper-camera-py.service` — CSI camera capture (cameras)
+- `./systemd/beekeeper-panel-py.service` — M1 front LED + user button
 
-Install both once per hub:
+Plus two non-systemd config files for the panel daemon:
+- `./udev/99-beekeeper-leds.rules` — lets non-root particle write to LED sysfs
+- `./sudoers.d/beekeeper-panel` — narrow sudo for the long-press → hub-restart action
+
+Install all of it once per hub:
 
 ```sh
-# BLE daemon
-sudo cp ./systemd/beekeeper-hub-py.service /etc/systemd/system/
+# Systemd units
+sudo cp ./systemd/beekeeper-hub-py.service     /etc/systemd/system/
+sudo cp ./systemd/beekeeper-camera-py.service  /etc/systemd/system/
+sudo cp ./systemd/beekeeper-panel-py.service   /etc/systemd/system/
 
-# Camera daemon (safe to enable before cameras work — it self-heals when ready)
-sudo cp ./systemd/beekeeper-camera-py.service /etc/systemd/system/
+# Photo buffer for camera daemon
 sudo mkdir -p /var/lib/beekeeper && sudo chown particle:particle /var/lib/beekeeper
 
+# Panel daemon: LED sysfs permissions (udev) + narrow sudo for hub restart
+sudo cp ./udev/99-beekeeper-leds.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger --attr-match=subsystem=leds
+
+sudo cp ./sudoers.d/beekeeper-panel /etc/sudoers.d/
+sudo chmod 440 /etc/sudoers.d/beekeeper-panel
+sudo visudo -c -f /etc/sudoers.d/beekeeper-panel   # syntax-check
+
+# Panel daemon also needs python3-evdev
+sudo apt-get install -y python3-evdev
+# OR (in the venv): /home/particle/beekeeper-ai/bin/pip install evdev
+
 sudo systemctl daemon-reload
-sudo systemctl enable --now beekeeper-hub-py
-sudo systemctl enable --now beekeeper-camera-py
-sudo systemctl status beekeeper-hub-py beekeeper-camera-py
+sudo systemctl enable --now beekeeper-hub-py beekeeper-camera-py beekeeper-panel-py
+sudo systemctl status beekeeper-hub-py beekeeper-camera-py beekeeper-panel-py
 ```
 
 Operate:

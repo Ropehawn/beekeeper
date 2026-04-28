@@ -1,0 +1,21 @@
+# Allow non-root users in the `video` group to write LED brightness on the
+# Tachyon's front RGB LEDs (PMIC PWM channels named red/green/blue).
+#
+# Default sysfs permissions on /sys/class/leds/*/brightness are root-only.
+# We need the panel daemon (running as `particle`) to drive them without
+# escalating to root. `video` is already a meaningful group on this system
+# (it owns /dev/video*) and `particle` is a member by default.
+#
+# Install:
+#   sudo cp hardware/tachyon-hub-py/udev/99-beekeeper-leds.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --attr-match=subsystem=leds
+#
+# Verify:
+#   ls -la /sys/class/leds/red/brightness
+#   # group=video, mode=0664
+
+ACTION=="add|change", SUBSYSTEM=="leds", \
+  KERNEL=="red|green|blue", \
+  RUN+="/bin/chgrp video /sys/class/leds/%k/brightness", \
+  RUN+="/bin/chmod 664 /sys/class/leds/%k/brightness"

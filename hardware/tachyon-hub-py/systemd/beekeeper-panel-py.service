@@ -1,0 +1,31 @@
+[Unit]
+Description=BeeKeeper M1 panel daemon (LEDs + user button)
+Documentation=https://github.com/Ropehawn/beekeeper/tree/main/hardware/tachyon-hub-py
+# Drives the front RGB LED and listens to the user button on the M1 enclosure.
+# LEDs go through PMIC PWM via /sys/class/leds; button is /dev/input/event0.
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=particle
+Group=particle
+# input group so /dev/input/event0 is readable without root
+SupplementaryGroups=input
+WorkingDirectory=/home/particle/beekeeper-ai
+ExecStart=/home/particle/beekeeper-ai/bin/python m1_panel.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=15
+
+# Allow writing to /sys/class/leds/{red,green,blue}/brightness without sudo
+# by relying on the udev rule in ../udev/. Without it, sysfs LED writes need root.
+# (See README install steps.)
+
+[Install]
+WantedBy=multi-user.target
