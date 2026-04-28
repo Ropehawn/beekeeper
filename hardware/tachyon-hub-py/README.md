@@ -91,8 +91,37 @@ Three units, one per daemon:
 - `./systemd/beekeeper-panel-py.service` — M1 front LED + user button
 
 Plus two non-systemd config files for the panel daemon:
-- `./udev/99-beekeeper-leds.rules` — lets non-root particle write to LED sysfs
+- `./logind.conf.d/50-beekeeper-panel.conf` — stops systemd-logind from shutting down the hub when the M1 button is pressed (the button shares the power-key input with the SoC)
 - `./sudoers.d/beekeeper-panel` — narrow sudo for the long-press → hub-restart action
+
+### Open: M1 RGB LEDs
+
+The M1 enclosure has 3 RGB LEDs driven by an ADP8866 I²C controller at
+address `0x27` on bus 1. **The panel daemon does NOT drive them.** Two
+unfinished pieces:
+
+1. The Particle Tachyon kernel does not include `leds-adp8860.ko` (which
+   covers the ADP8866). Only `leds-adp5520` is shipped. Until that driver
+   is compiled — out-of-tree against `linux-headers-particle`, or contributed
+   to Particle's kernel build — there is no kernel-side LED control path.
+2. There is no shipped device-tree overlay binding `compatible = "adi,adp8866"`
+   to `0x27`. `tachyon-overlays` does not include one. We'd have to write it
+   alongside the IMX519 camera overlays we already use.
+
+Particle is actively soliciting community contributions for Linux-side
+hardware bring-up on Ubuntu 24.04 (see the
+[Ubuntu 24.04 thread](https://community.particle.io/t/ubuntu-24-04-on-tachyon-early-access-open-development/70503)) —
+the `leds-adp8860` build + the M1 LED overlay is exactly that kind of work.
+
+Reference for register-level sanity check (Muon/M404, not Tachyon):
+[M1 Enclosure LED community thread](https://community.particle.io/t/m1-enclosure-led/70599).
+Note from rickkas7 in that thread: LED4 = top status LED, LED5/LED6 = the
+two user-button LEDs. (The Muon-specific `3V3_AUX` requirement does NOT
+apply on Tachyon.)
+
+The `/sys/class/leds/{red,green,blue}` entries are NOT the M1 LEDs —
+they're the Tachyon SoM's onboard PMIC-PWM status indicator and are owned
+by Particle's own daemon. The panel daemon must not write to them.
 
 Install all of it once per hub:
 
@@ -105,10 +134,10 @@ sudo cp ./systemd/beekeeper-panel-py.service   /etc/systemd/system/
 # Photo buffer for camera daemon
 sudo mkdir -p /var/lib/beekeeper && sudo chown particle:particle /var/lib/beekeeper
 
-# Panel daemon: LED sysfs permissions (udev) + narrow sudo for hub restart
-sudo cp ./udev/99-beekeeper-leds.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-sudo udevadm trigger --attr-match=subsystem=leds
+# Panel daemon: logind drop-in (button doesn't shut us down) + narrow sudo
+sudo mkdir -p /etc/systemd/logind.conf.d
+sudo cp ./logind.conf.d/50-beekeeper-panel.conf /etc/systemd/logind.conf.d/
+sudo systemctl restart systemd-logind   # picks up the drop-in
 
 sudo cp ./sudoers.d/beekeeper-panel /etc/sudoers.d/
 sudo chmod 440 /etc/sudoers.d/beekeeper-panel

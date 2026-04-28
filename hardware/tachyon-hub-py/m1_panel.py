@@ -2,61 +2,57 @@
 """
 BeeKeeper M1 Panel Daemon
 
-Drives the M1 enclosure's front RGB indicator LED + listens to the user
-button. Sibling to ble_ingestion_daemon.py and camera_capture.py.
+Reacts to the M1 enclosure user button. Sibling to ble_ingestion_daemon.py
+and camera_capture.py.
 
-Hardware:
-  - Front RGB LED:  Qualcomm PMIC PWM channels, exposed as
-                    /sys/class/leds/{red,green,blue}/brightness (0-511).
-                    No external chip drama — just sysfs writes.
-  - User button:    gpio-keys driver, exposed as /dev/input/event0.
-                    Read via evdev. Click patterns map to actions.
+Status of M1 LEDs:
+    The M1 enclosure has 3 RGB LEDs driven by an ADP8866 I²C controller at
+    address 0x27 on bus 1. Particle's only published ADP8866 library is
+    Device-OS-only (https://github.com/particle-iot/particle-adp8866) and
+    won't run on Tachyon Linux. Mainline Linux ships drivers/leds/leds-adp8860.c
+    which covers the ADP8866, but the Particle Tachyon kernel build does NOT
+    include it (only leds-adp5520 is present in /lib/modules). Until that
+    driver is compiled and a device-tree overlay binds it to 0x27, this
+    daemon does NOT touch the M1 LEDs. Earlier attempts to drive them by
+    raw I²C produced no visible result — see notes in
+    ../../hardware/tachyon-hub-py/README.md.
 
-LED state mapping (driven by systemd unit + recent journal liveness):
+    The /sys/class/leds/{red,green,blue} entries you may see on the system
+    are NOT the M1 LEDs — they're the Tachyon SoM's onboard status LED,
+    driven by the Qualcomm PMIC PWM and owned by Particle's daemon for
+    cloud-connection state. We must not touch them.
 
-    BLE daemon active + sensors ≥3 + camera daemon active   → solid GREEN  (healthy)
-    BLE active + sensors <3 OR camera daemon inactive       → solid AMBER  (degraded)
-    BLE active but no recent scans                          → flashing AMBER
-    BLE daemon failed/restarting                            → flashing RED
-    Daemon hasn't reported its first state yet              → soft cyan pulse (booting)
+User button:
+    The M1 user button is wired in parallel with the Tachyon's power button
+    input, so it appears at /dev/input/event2 (pmic_pwrkey) and fires
+    KEY_POWER. By default systemd-logind catches this and shuts the hub
+    down — we deploy a logind drop-in (sudoers.d-style) that sets
+    HandlePowerKey=ignore so the daemon can read button presses without
+    the OS killing itself.
 
-Button click patterns:
-
-    Single click (< 0.6 s)            → log status to journald, blink ack
-    Double click (two within 0.6 s)   → force BLE upload (TODO: signal hub-py)
-    Long press (≥ 3 s)                → request graceful restart of beekeeper-hub-py
-                                       (systemctl restart, requires sudoers entry)
-    Held ≥ 10 s                       → reserved for future re-provision mode
-
-Sudo configuration required for restart action:
-    /etc/sudoers.d/beekeeper-panel must allow:
-      particle ALL=(root) NOPASSWD: /bin/systemctl restart beekeeper-hub-py
+Click patterns:
+    Single click (< 0.6 s)          → log status snapshot to journald
+    Double click (two within 0.6 s) → force BLE upload (TODO: IPC into hub-py)
+    Long press (≥ 3 s)              → restart beekeeper-hub-py via narrow sudo
+    Held ≥ 10 s                     → reserved for re-provision mode
 """
 
 import json
 import logging
 import os
 import select
-import struct
 import subprocess
 import sys
 import time
-from collections import deque
 from pathlib import Path
 
-# evdev is the standard linux input-event library; install via
-#   pip install evdev
-# or apt: python3-evdev. We import lazily so missing-dep failures don't kill
-# the LED side of the daemon.
+# /dev/input/event2 = pmic_pwrkey on the Tachyon — this is where M1 button
+# presses surface, because the M1's button shorts the Tachyon power button
+# input. Earlier we wrongly listened to event0 (gpio-keys); that's a
+# different switch entirely and never fired for the M1 button.
+BUTTON_DEVICE = Path("/dev/input/event2")
 
-LED_RED   = Path("/sys/class/leds/red/brightness")
-LED_GREEN = Path("/sys/class/leds/green/brightness")
-LED_BLUE  = Path("/sys/class/leds/blue/brightness")
-LED_MAX   = 511
-
-BUTTON_DEVICE = Path("/dev/input/event0")
-
-# Health probe cadence
+# Cadence
 HEALTH_PROBE_SEC = 15
 
 # Click-pattern timing (seconds)
@@ -65,7 +61,7 @@ DOUBLE_CLICK_GAP = 0.6
 LONG_PRESS_THRESHOLD = 3.0
 VERY_LONG_PRESS_THRESHOLD = 10.0
 
-# Healthcheck: minimum sensors visible to call the system "fully healthy"
+# Health classifier inputs
 MIN_SENSORS_HEALTHY = 3
 
 logging.basicConfig(
@@ -76,37 +72,9 @@ logging.basicConfig(
 log = logging.getLogger("panel-daemon")
 
 
-# ── LED control ──────────────────────────────────────────────────────────────
-
-def _write_led(path: Path, value: int):
-    """Best-effort sysfs LED brightness write; logs but never raises."""
-    try:
-        path.write_text(str(max(0, min(LED_MAX, value))))
-    except OSError as e:
-        log.warning(f"LED write {path}: {e}")
-
-
-def set_color(r: int, g: int, b: int):
-    """Set R/G/B in 0..LED_MAX. Pure off = (0,0,0)."""
-    _write_led(LED_RED, r)
-    _write_led(LED_GREEN, g)
-    _write_led(LED_BLUE, b)
-
-
-# Symbolic colors (full saturation; fade by halving etc.)
-GREEN  = (0, LED_MAX, 0)
-AMBER  = (LED_MAX, LED_MAX // 3, 0)   # red + small green
-RED    = (LED_MAX, 0, 0)
-CYAN   = (0, LED_MAX, LED_MAX)
-WHITE  = (LED_MAX, LED_MAX, LED_MAX)
-OFF    = (0, 0, 0)
-DIM_CYAN = (0, LED_MAX // 4, LED_MAX // 4)
-
-
-# ── Health probe ─────────────────────────────────────────────────────────────
+# ── Health probe (used for logging on button press; no LED output yet) ───────
 
 def _systemctl_active(unit: str) -> bool:
-    """True if `systemctl is-active <unit>` returns 'active'."""
     try:
         r = subprocess.run(
             ["systemctl", "is-active", unit],
@@ -118,102 +86,32 @@ def _systemctl_active(unit: str) -> bool:
 
 
 def _journal_recent_scan_count(unit: str = "beekeeper-hub-py", since: str = "2 min ago") -> int:
-    """How many scans the BLE daemon has logged in the last <since> minutes,
-    and the count of distinct sensors it last saw. Returns -1 on failure."""
     try:
         r = subprocess.run(
             ["journalctl", "-u", unit, "--no-pager", "--since", since],
             capture_output=True, text=True, timeout=5,
         )
-        last_scan_line = ""
+        last = ""
         for line in r.stdout.splitlines():
             if "Scan: " in line and "sensors" in line:
-                last_scan_line = line
-        if not last_scan_line:
+                last = line
+        if not last:
             return 0
-        # "Scan: 5 sensors (SC833F=4, C6=1) — ..."
-        # Extract the integer after "Scan: "
         try:
-            tail = last_scan_line.split("Scan: ", 1)[1]
-            n = int(tail.split(" ", 1)[0])
-            return n
+            return int(last.split("Scan: ", 1)[1].split(" ", 1)[0])
         except (IndexError, ValueError):
             return 0
     except subprocess.SubprocessError:
         return -1
 
 
-class HealthState:
-    HEALTHY    = "healthy"
-    DEGRADED   = "degraded"
-    SCAN_STALE = "scan_stale"
-    DOWN       = "down"
-    BOOTING    = "booting"
-
-
-def probe_health() -> str:
-    """Classify the system into one of HealthState values."""
-    ble_alive    = _systemctl_active("beekeeper-hub-py")
-    camera_alive = _systemctl_active("beekeeper-camera-py")  # optional
-    if not ble_alive:
-        return HealthState.DOWN
-
-    sensor_count = _journal_recent_scan_count("beekeeper-hub-py", since="2 min ago")
-    if sensor_count == 0:
-        return HealthState.SCAN_STALE  # alive but not scanning yet
-    if sensor_count >= MIN_SENSORS_HEALTHY and camera_alive:
-        return HealthState.HEALTHY
-    return HealthState.DEGRADED  # alive, partially working
-
-
-# ── LED state machine driven by health ───────────────────────────────────────
-
-class LedDriver:
-    """Maintains the current LED state and drives sysfs writes as a function
-    of (a) health classification (b) blinking phase (c) any short-lived
-    overrides like button-ack flashes."""
-
-    def __init__(self):
-        self.state = HealthState.BOOTING
-        self.phase_t0 = time.monotonic()
-        self.override_until: float = 0.0
-        self.override_color: tuple[int, int, int] | None = None
-
-    def set_state(self, state: str):
-        if state != self.state:
-            log.info(f"LED state: {self.state} → {state}")
-        self.state = state
-        self.phase_t0 = time.monotonic()
-
-    def set_override(self, color: tuple[int, int, int], duration_sec: float):
-        self.override_until = time.monotonic() + duration_sec
-        self.override_color = color
-
-    def tick(self):
-        """Update the LED hardware to reflect current state."""
-        now = time.monotonic()
-
-        if now < self.override_until and self.override_color is not None:
-            set_color(*self.override_color)
-            return
-
-        elapsed = now - self.phase_t0
-        # 1Hz blink phase
-        blink_on = (int(elapsed * 2) % 2) == 0  # 4Hz toggle = 2Hz visible
-
-        if self.state == HealthState.HEALTHY:
-            set_color(*GREEN)
-        elif self.state == HealthState.DEGRADED:
-            set_color(*AMBER)
-        elif self.state == HealthState.SCAN_STALE:
-            set_color(*AMBER if blink_on else OFF)
-        elif self.state == HealthState.DOWN:
-            set_color(*RED if blink_on else OFF)
-        elif self.state == HealthState.BOOTING:
-            # Pulse: half-bright cyan, gentle
-            set_color(*DIM_CYAN if blink_on else OFF)
-        else:
-            set_color(*OFF)
+def status_snapshot() -> dict:
+    return {
+        "ble_daemon":    _systemctl_active("beekeeper-hub-py"),
+        "camera_daemon": _systemctl_active("beekeeper-camera-py"),
+        "panel_daemon":  True,
+        "sensors_last_scan": _journal_recent_scan_count(),
+    }
 
 
 # ── Button click pattern detection ───────────────────────────────────────────
@@ -236,7 +134,7 @@ class ButtonHandler:
         self.press_t0 = t
         self.long_fired = False
         self.very_long_fired = False
-        # If a pending single is waiting, this might be a double — cancel single
+        # Second click within window cancels pending single, fires double.
         if self.pending_single_at and (t - (self.last_release_t or 0)) < DOUBLE_CLICK_GAP:
             self.pending_single_at = None
             self.last_release_t = None
@@ -250,20 +148,16 @@ class ButtonHandler:
         held = t - self.press_t0
         self.press_t0 = None
 
-        if self.very_long_fired or held >= VERY_LONG_PRESS_THRESHOLD:
-            return  # already fired during hold
-        if self.long_fired or held >= LONG_PRESS_THRESHOLD:
-            return  # already fired during hold
+        # If long-press already fired during hold, don't also fire single.
+        if self.long_fired or self.very_long_fired:
+            return
 
         if held <= SHORT_PRESS_MAX:
-            # Defer the single-click action: maybe a double is coming.
             self.pending_single_at = t + DOUBLE_CLICK_GAP
             self.last_release_t = t
-        # else: held longer than a short click but not long enough for "long"
-        # (between 0.6s and 3s) — we ignore for now.
 
     def tick(self, t: float):
-        # Long-press while held detection
+        # Long-press detection while held
         if self.press_t0 is not None:
             held = t - self.press_t0
             if not self.very_long_fired and held >= VERY_LONG_PRESS_THRESHOLD:
@@ -277,8 +171,7 @@ class ButtonHandler:
                 try: self.on_long()
                 except Exception as e: log.error(f"on_long: {e}")
 
-        # Pending-single fires after the double-click window expires with no
-        # second press.
+        # Pending single fires after the double-click window expires.
         if self.pending_single_at and t >= self.pending_single_at:
             self.pending_single_at = None
             self.last_release_t = None
@@ -287,32 +180,27 @@ class ButtonHandler:
             except Exception as e: log.error(f"on_single: {e}")
 
 
-# ── Action handlers (button-triggered) ───────────────────────────────────────
+# ── Button-triggered actions ─────────────────────────────────────────────────
 
-def action_log_status(led: LedDriver):
-    """Single click — log a status snapshot + 3 green blinks ack."""
-    state = probe_health()
-    sensors = _journal_recent_scan_count()
+def action_log_status():
+    """Single click — log a status snapshot to journald."""
+    snap = status_snapshot()
     log.info(
-        f"STATUS  state={state}  sensors_last_scan={sensors}  "
-        f"ble_active={_systemctl_active('beekeeper-hub-py')}  "
-        f"cam_active={_systemctl_active('beekeeper-camera-py')}"
+        f"STATUS  ble={snap['ble_daemon']}  cam={snap['camera_daemon']}  "
+        f"sensors_last_scan={snap['sensors_last_scan']}"
     )
-    led.set_override(GREEN, 0.4)
 
 
-def action_force_upload(led: LedDriver):
-    """Double click — placeholder. Full implementation needs an IPC channel
-    into beekeeper-hub-py to trigger an immediate upload_readings() call."""
+def action_force_upload():
+    """Double click — placeholder. Full implementation needs IPC into
+    beekeeper-hub-py to trigger an immediate upload."""
     log.info("force-upload requested (not yet wired into hub-py)")
-    led.set_override(WHITE, 0.4)
 
 
-def action_restart_hub(led: LedDriver):
+def action_restart_hub():
     """Long press — graceful restart of the BLE ingestion daemon. Requires
-    sudoers entry; if the call fails we just blink red briefly."""
-    log.warning("button: requesting restart of beekeeper-hub-py")
-    led.set_override(AMBER, 1.0)
+    sudoers entry (see ./sudoers.d/beekeeper-panel)."""
+    log.warning("button: restarting beekeeper-hub-py")
     try:
         r = subprocess.run(
             ["sudo", "-n", "systemctl", "restart", "beekeeper-hub-py"],
@@ -320,23 +208,19 @@ def action_restart_hub(led: LedDriver):
         )
         if r.returncode != 0:
             log.error(f"restart failed: {r.stderr.strip()[:200]}")
-            led.set_override(RED, 1.0)
         else:
             log.info("beekeeper-hub-py restart issued")
     except subprocess.SubprocessError as e:
         log.error(f"restart subprocess error: {e}")
 
 
-def action_reprovision_mode(led: LedDriver):
+def action_reprovision_mode():
     log.info("very-long press — reprovision mode placeholder (not implemented)")
-    # Cyan blink briefly to acknowledge
-    led.set_override(CYAN, 1.0)
 
 
 # ── Main loop ────────────────────────────────────────────────────────────────
 
 def open_button():
-    """Try to open the button input device. Returns evdev InputDevice or None."""
     if not BUTTON_DEVICE.exists():
         log.warning(f"{BUTTON_DEVICE} not present; button events disabled")
         return None
@@ -354,43 +238,44 @@ def open_button():
 
 
 def run():
-    log.info("Starting M1 panel daemon")
-    led = LedDriver()
+    log.info("Starting M1 panel daemon (button-only — LED driver not yet built)")
     button = open_button()
     handler = ButtonHandler(
-        on_single=lambda: action_log_status(led),
-        on_double=lambda: action_force_upload(led),
-        on_long=lambda: action_restart_hub(led),
-        on_very_long=lambda: action_reprovision_mode(led),
+        on_single=action_log_status,
+        on_double=action_force_upload,
+        on_long=action_restart_hub,
+        on_very_long=action_reprovision_mode,
     )
 
-    last_health_probe = 0.0
     poll = select.poll()
     if button:
         poll.register(button.fd, select.POLLIN)
 
+    last_health_log = 0.0
     try:
         while True:
             now = time.monotonic()
 
-            # Health probe (cadenced) — also re-classify on every tick so
-            # button overrides don't get re-applied indefinitely.
-            if now - last_health_probe > HEALTH_PROBE_SEC:
-                state = probe_health()
-                led.set_state(state)
-                last_health_probe = now
+            # Periodic background log of system state — useful in journalctl
+            # so we can see panel daemon health without pressing the button.
+            if now - last_health_log > HEALTH_PROBE_SEC * 4:  # every ~60s
+                snap = status_snapshot()
+                log.debug(
+                    f"health  ble={snap['ble_daemon']}  cam={snap['camera_daemon']}  "
+                    f"sensors_last_scan={snap['sensors_last_scan']}"
+                )
+                last_health_log = now
 
-            # Button events (non-blocking, 100ms tick)
             if button:
                 events = poll.poll(100)
                 if events:
                     try:
-                        from evdev import categorize, ecodes
+                        from evdev import ecodes
                         for ev in button.read():
                             if ev.type == ecodes.EV_KEY:
-                                if ev.value == 1:   # KEY_DOWN
+                                if ev.value == 1:
                                     handler.on_press(time.monotonic())
-                                elif ev.value == 0: # KEY_UP
+                                elif ev.value == 0:
                                     handler.on_release(time.monotonic())
                     except (BlockingIOError, OSError):
                         pass
@@ -398,14 +283,9 @@ def run():
                 time.sleep(0.1)
 
             handler.tick(time.monotonic())
-            led.tick()
+
     except KeyboardInterrupt:
-        log.info("Shutting down — turning LED off")
-        set_color(0, LED_MAX // 4, LED_MAX // 4)  # leave dim cyan
-    except Exception as e:
-        log.error(f"Fatal: {type(e).__name__}: {e}")
-        set_color(*RED)
-        raise
+        log.info("Shutting down panel daemon")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,15 @@
 [Unit]
-Description=BeeKeeper M1 panel daemon (LEDs + user button)
+Description=BeeKeeper M1 panel daemon (button only — LED driver pending)
 Documentation=https://github.com/Ropehawn/beekeeper/tree/main/hardware/tachyon-hub-py
-# Drives the front RGB LED and listens to the user button on the M1 enclosure.
-# LEDs go through PMIC PWM via /sys/class/leds; button is /dev/input/event0.
-After=network-online.target
+# Listens to the M1 enclosure user button on /dev/input/event2 (pmic_pwrkey
+# — the M1 button is wired in parallel with the Tachyon power button).
+# A logind drop-in disables HandlePowerKey so presses don't shut us down.
+#
+# LED control over ADP8866 at I²C 0x27 is intentionally absent until the
+# leds-adp8860 mainline driver gets compiled into Particle's kernel build
+# (or built out-of-tree). Earlier attempts to drive the chip via raw I²C
+# from this daemon were unsuccessful.
+After=network-online.target systemd-logind.service
 Wants=network-online.target
 StartLimitIntervalSec=600
 StartLimitBurst=5
