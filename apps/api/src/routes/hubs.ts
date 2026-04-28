@@ -5,11 +5,13 @@
 // at registration time (via the admin UI — future).
 //
 // Endpoints:
-//   POST /api/v1/hubs/register        (admin, JWT)  — creates a hub, returns raw key once
-//   POST /api/v1/hubs/ingest          (hub,   key)  — batch upload of SensorReadingRaw rows
-//   POST /api/v1/hubs/heartbeat       (hub,   key)  — liveness + diagnostics
-//   GET  /api/v1/hubs/config          (hub,   key)  — hub pulls its config (device map)
-//   GET  /api/v1/hubs                 (admin, JWT)  — list hubs (no secrets)
+//   POST /api/v1/hubs/register             (admin, JWT)  — creates a hub, returns raw key once
+//   POST /api/v1/hubs/ingest               (hub,   key)  — batch upload of SensorReadingRaw rows
+//   POST /api/v1/hubs/heartbeat            (hub,   key)  — liveness + diagnostics
+//   GET  /api/v1/hubs/config               (hub,   key)  — hub pulls its config (device map)
+//   POST /api/v1/hubs/photos/upload-url    (hub,   key)  — get presigned R2 PUT URL for a CSI capture
+//   POST /api/v1/hubs/photos/confirm       (hub,   key)  — finalize a CSI capture after R2 upload
+//   GET  /api/v1/hubs                      (admin, JWT)  — list hubs (no secrets)
 //
 // See INTELLIGENCE_SPEC §6 and HARDWARE_SPEC §10 for context.
 
@@ -19,6 +21,11 @@ import { db, Prisma } from "@beekeeper/db";
 import { z } from "zod";
 import { requireAuth, AuthRequest } from "../middleware/auth";
 import { logger } from "../lib/logger";
+import {
+  isR2Configured,
+  getPresignedUploadUrl,
+  headObject,
+} from "../storage/r2";
 
 const router = Router();
 
@@ -208,6 +215,122 @@ router.post("/heartbeat", requireHubKey, async (req: HubRequest, res) => {
   });
 
   res.json({ ok: true });
+});
+
+// ── POST /api/v1/hubs/photos/upload-url ──────────────────────────────────────
+// Capture daemon (hardware/tachyon-hub-py/camera_capture.py) calls this with
+// metadata for a still about to be captured. We allocate the storage_key,
+// write a CameraCapture row in pending state (storage_key set, file_size_bytes
+// = 0 until confirm), and return a presigned PUT URL for direct R2 upload.
+//
+// Response: { id, storageKey, uploadUrl, expiresAt }
+
+const photoUploadUrlSchema = z.object({
+  cameraIndex:   z.number().int().min(0).max(7),
+  capturedAt:    z.string().datetime(),
+  hiveId:        z.string().uuid().nullable().optional(),
+  width:         z.number().int().positive().optional(),
+  height:        z.number().int().positive().optional(),
+  format:        z.enum(["jpeg", "png", "raw"]).default("jpeg"),
+  capturePhase:  z.enum(["scheduled", "burst", "manual"]).default("scheduled"),
+  meta:          z.record(z.unknown()).optional(),
+});
+
+router.post("/photos/upload-url", requireHubKey, async (req: HubRequest, res) => {
+  const parsed = photoUploadUrlSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid input", details: parsed.error.flatten() });
+  }
+  if (!isR2Configured()) {
+    return res.status(503).json({
+      error: "R2 storage not available",
+      detail: "R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_BUCKET_NAME must be configured",
+    });
+  }
+
+  const { cameraIndex, capturedAt, hiveId, width, height, format, capturePhase, meta } = parsed.data;
+  const hubId = req.hub!.id;
+
+  // Storage key layout: hubs/{hubId}/cameras/{idx}/YYYY/MM/DD/{captureId}.{ext}
+  // Lets us list/scan by hub, by camera, or by date with prefix queries.
+  const captureId = crypto.randomUUID();
+  const ext = format === "raw" ? "raw" : format;
+  const dt = new Date(capturedAt);
+  const yyyy = dt.getUTCFullYear();
+  const mm   = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd   = String(dt.getUTCDate()).padStart(2, "0");
+  const storageKey = `hubs/${hubId}/cameras/${cameraIndex}/${yyyy}/${mm}/${dd}/${captureId}.${ext}`;
+  const mimeType = format === "jpeg" ? "image/jpeg"
+                  : format === "png" ? "image/png"
+                  : "application/octet-stream";
+
+  // Create the row in pending state. file_size_bytes will be filled in on confirm.
+  const row = await db.cameraCapture.create({
+    data: {
+      id:             captureId,
+      hubId,
+      hiveId:         hiveId ?? null,
+      cameraIndex,
+      capturedAt:     dt,
+      storageKey,
+      fileSizeBytes:  0,
+      width:          width ?? null,
+      height:         height ?? null,
+      format,
+      capturePhase,
+      metaJson:       meta ? (meta as Prisma.InputJsonValue) : Prisma.JsonNull,
+    },
+    select: { id: true, storageKey: true },
+  });
+
+  const { url, expiresAt } = await getPresignedUploadUrl(storageKey, mimeType, 600);
+
+  return res.json({
+    id:         row.id,
+    storageKey: row.storageKey,
+    uploadUrl:  url,
+    expiresAt:  expiresAt.toISOString(),
+  });
+});
+
+// ── POST /api/v1/hubs/photos/confirm ─────────────────────────────────────────
+// Daemon calls this AFTER successfully PUTting the image bytes to R2.
+// We HeadObject to verify the file exists and write the actual file size in.
+// Without this confirm step, capture rows are pending and can be GC'd by a
+// future cleanup job (anything > 1h old with file_size_bytes = 0).
+
+const photoConfirmSchema = z.object({
+  id: z.string().uuid(),
+});
+
+router.post("/photos/confirm", requireHubKey, async (req: HubRequest, res) => {
+  const parsed = photoConfirmSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid input", details: parsed.error.flatten() });
+  }
+
+  const row = await db.cameraCapture.findUnique({
+    where: { id: parsed.data.id },
+    select: { id: true, hubId: true, storageKey: true, fileSizeBytes: true },
+  });
+  if (!row) return res.status(404).json({ error: "not found" });
+  if (row.hubId !== req.hub!.id) return res.status(403).json({ error: "wrong hub" });
+
+  const head = await headObject(row.storageKey);
+  if (!head.exists) {
+    return res.status(409).json({
+      error: "object_not_in_r2",
+      hint: "PUT to the presigned URL before calling confirm",
+    });
+  }
+
+  await db.cameraCapture.update({
+    where: { id: row.id },
+    data:  { fileSizeBytes: head.contentLength ?? 0 },
+  });
+
+  logger.info({ hubId: row.hubId, captureId: row.id, bytes: head.contentLength }, "hub.photo.confirmed");
+  return res.json({ id: row.id, fileSizeBytes: head.contentLength });
 });
 
 // ── GET /api/v1/hubs/config ──────────────────────────────────────────────────

@@ -12,8 +12,9 @@ payloads, batches readings, and uploads to the BeeKeeper API.
 
 | File | Purpose |
 |---|---|
-| `ble_ingestion_daemon.py` | Main daemon — scan + parse + batch + upload |
-| `provision_sensor.py` | CLI tool for per-sensor provisioning (assigns a human-readable ID, MAC binding) |
+| `ble_ingestion_daemon.py` | Main BLE daemon — scan + parse + batch + upload + heartbeat |
+| `camera_capture.py` | CSI camera capture daemon — IMX519 stills, R2 upload via API |
+| `provision_sensor.py` | CLI tool for per-sensor provisioning (`--c6` for ESP32-C6, default for SC833F) |
 | `provision_web.py` | Local web UI (port 5050) for provisioning from a phone |
 | `raw_hci_scan.py` | One-shot BLE advertisement dumper for debugging |
 | `hub-config.example.json` | Template config — copy to `hub-config.json`, fill in `hubId` + `apiKey` |
@@ -82,15 +83,25 @@ cd ~/beekeeper-ai
 
 ### Under systemd (production)
 
-Unit file: `./systemd/beekeeper-hub-py.service`
+Two units, one per daemon:
 
-Install once per hub:
+- `./systemd/beekeeper-hub-py.service` — BLE ingestion (sensors)
+- `./systemd/beekeeper-camera-py.service` — CSI camera capture (cameras)
+
+Install both once per hub:
 
 ```sh
+# BLE daemon
 sudo cp ./systemd/beekeeper-hub-py.service /etc/systemd/system/
+
+# Camera daemon (safe to enable before cameras work — it self-heals when ready)
+sudo cp ./systemd/beekeeper-camera-py.service /etc/systemd/system/
+sudo mkdir -p /var/lib/beekeeper && sudo chown particle:particle /var/lib/beekeeper
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now beekeeper-hub-py
-sudo systemctl status beekeeper-hub-py
+sudo systemctl enable --now beekeeper-camera-py
+sudo systemctl status beekeeper-hub-py beekeeper-camera-py
 ```
 
 Operate:

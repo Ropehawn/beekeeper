@@ -138,6 +138,7 @@ model Hive {
   cameras            CameraDevice[]
   sensorReadingsRaw  SensorReadingRaw[]
   sensorRegistries   SensorRegistry[]
+  cameraCaptures     CameraCapture[]
 
   @@map("hives")
 }
@@ -702,6 +703,7 @@ model Hub {
   apiary            Apiary?            @relation(fields: [apiaryId], references: [id], onDelete: SetNull)
   sensorReadingsRaw SensorReadingRaw[]
   sensorRegistries  SensorRegistry[]
+  cameraCaptures    CameraCapture[]
 
   @@index([apiaryId])
   @@map("hubs")
@@ -735,6 +737,43 @@ model SensorReadingRaw {
   @@index([hubId, recordedAt])
   @@index([deviceId, metric, recordedAt])
   @@map("sensor_readings_raw")
+}
+
+// ─── Camera Captures (per-hive CSI cameras on the hub) ────────────────────────
+//
+// One row per still or burst-frame from an Arducam IMX519 camera attached to
+// the Tachyon's CSI ports. Image bytes live in R2; this table is the index +
+// metadata + ML-inference write-back target. The capture daemon
+// (hardware/tachyon-hub-py/camera_capture.py) creates rows by POSTing
+// /api/v1/hubs/photos with the image; an inference worker fills in
+// bee_count / varroa_count / inference_json once the model has run.
+
+model CameraCapture {
+  id             String   @id @default(uuid()) @db.Uuid
+  hubId          String   @map("hub_id") @db.Uuid
+  hiveId         String?  @map("hive_id") @db.Uuid
+  cameraIndex    Int      @map("camera_index")           // 0 or 1 — CSI port
+  capturedAt     DateTime @map("captured_at")
+  storageKey     String   @map("storage_key")            // R2 object key
+  fileSizeBytes  Int      @map("file_size_bytes")
+  width          Int?
+  height         Int?
+  format         String   @default("jpeg")               // jpeg | png | raw
+  capturePhase   String   @default("scheduled") @map("capture_phase") // scheduled | burst | manual
+  metaJson       Json?    @map("meta_json")              // exposure, gain, lens position
+  beeCount       Int?     @map("bee_count")
+  varroaCount    Int?     @map("varroa_count")
+  inferenceJson  Json?    @map("inference_json")
+  inferredAt     DateTime? @map("inferred_at")
+  inferenceModel String?  @map("inference_model")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  hub  Hub   @relation(fields: [hubId], references: [id], onDelete: Cascade)
+  hive Hive? @relation(fields: [hiveId], references: [id], onDelete: SetNull)
+
+  @@index([hubId, capturedAt])
+  @@index([hiveId, capturedAt])
+  @@map("camera_captures")
 }
 
 // ─── Sensor Registry & Provisioning (Tachyon identity layer) ──────────────────

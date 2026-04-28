@@ -1,0 +1,31 @@
+[Unit]
+Description=BeeKeeper Tachyon CSI camera capture daemon (Python)
+Documentation=https://github.com/Ropehawn/beekeeper/tree/main/hardware/tachyon-hub-py
+# Camera capture works once libcamera/rpicam tools are installed AND the
+# IMX519 dtbo overlay has been enabled in the boot partition. The daemon
+# is robust to neither being ready — it'll log "no capture stack" and keep
+# retrying — so the unit can be enabled before the camera plumbing is done.
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=particle
+Group=particle
+WorkingDirectory=/home/particle/beekeeper-ai
+ExecStart=/home/particle/beekeeper-ai/bin/python camera_capture.py
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=15
+
+# Photos buffer: where the daemon writes locally before upload.
+# Created at first run via the daemon itself, but make sure systemd allows it.
+ReadWritePaths=/var/lib/beekeeper
+
+[Install]
+WantedBy=multi-user.target
