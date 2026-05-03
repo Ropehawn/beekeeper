@@ -2,31 +2,22 @@
 """
 BeeKeeper M1 Panel Daemon
 
-Reacts to the M1 enclosure user button. Sibling to ble_ingestion_daemon.py
-and camera_capture.py.
+Reacts to the M1 enclosure user button and drives the three RGB status LEDs
+on the M1 carrier (ADP8866 at I²C address 0x27 on bus 1).
 
-Status of M1 LEDs:
-    The M1 enclosure has 3 RGB LEDs driven by an ADP8866 I²C controller at
-    address 0x27 on bus 1. Particle's only published ADP8866 library is
-    Device-OS-only (https://github.com/particle-iot/particle-adp8866) and
-    won't run on Tachyon Linux. Mainline Linux ships drivers/leds/leds-adp8860.c
-    which covers the ADP8866, but the Particle Tachyon kernel build does NOT
-    include it (only leds-adp5520 is present in /lib/modules). Until that
-    driver is compiled and a device-tree overlay binds it to 0x27, this
-    daemon does NOT touch the M1 LEDs. Earlier attempts to drive them by
-    raw I²C produced no visible result — see notes in
-    ../../hardware/tachyon-hub-py/README.md.
+Sibling to ble_ingestion_daemon.py and camera_capture.py.
 
-    The /sys/class/leds/{red,green,blue} entries you may see on the system
-    are NOT the M1 LEDs — they're the Tachyon SoM's onboard status LED,
-    driven by the Qualcomm PMIC PWM and owned by Particle's daemon for
-    cloud-connection state. We must not touch them.
+LED states:
+    startup           → blue pulse on top
+    healthy / running → top steady green
+    button press      → quick white flash on a side LED
+    error fallback    → top steady red
 
 User button:
     The M1 user button is wired in parallel with the Tachyon's power button
     input, so it appears at /dev/input/event2 (pmic_pwrkey) and fires
     KEY_POWER. By default systemd-logind catches this and shuts the hub
-    down — we deploy a logind drop-in (sudoers.d-style) that sets
+    down — we deploy a logind drop-in (see ./logind.conf.d/) that sets
     HandlePowerKey=ignore so the daemon can read button presses without
     the OS killing itself.
 
@@ -72,7 +63,75 @@ logging.basicConfig(
 log = logging.getLogger("panel-daemon")
 
 
-# ── Health probe (used for logging on button press; no LED output yet) ───────
+# ── LED driver wrapper ───────────────────────────────────────────────────────
+
+# Module-level singleton so click handlers can flash without passing state.
+_leds = None
+
+
+def init_leds():
+    """Bring up the ADP8866 driver. Returns the driver or None if unavailable."""
+    global _leds
+    try:
+        from adp8866 import ADP8866
+    except ImportError as e:
+        log.warning(f"adp8866 module not importable: {e} — LEDs disabled")
+        return None
+    try:
+        _leds = ADP8866()
+        log.info("ADP8866 LED driver initialized at /dev/i2c-1 0x27")
+        return _leds
+    except Exception as e:
+        log.warning(f"ADP8866 init failed: {e} — LEDs disabled")
+        _leds = None
+        return None
+
+
+def led_state_startup():
+    """Three blue pulses on the top LED to indicate boot."""
+    if _leds is None:
+        return
+    try:
+        from adp8866 import pulse
+        pulse(_leds, "top", color=(0, 0, 80), cycles=3, period_sec=0.8)
+    except Exception as e:
+        log.warning(f"led_state_startup: {e}")
+
+
+def led_state_healthy():
+    """Top LED steady green — daemon is up, backend services are alive."""
+    if _leds is None:
+        return
+    try:
+        _leds.green("top", brightness=40)
+    except Exception as e:
+        log.warning(f"led_state_healthy: {e}")
+
+
+def led_state_error():
+    """Top LED steady red — something is wrong."""
+    if _leds is None:
+        return
+    try:
+        _leds.red("top", brightness=80)
+    except Exception as e:
+        log.warning(f"led_state_error: {e}")
+
+
+def led_flash_side(side: str, color: tuple = (50, 50, 50), duration: float = 0.18):
+    """Briefly flash one of the side LEDs ('left' or 'right'). After the
+    flash, restore the healthy state on the top LED so we're not stuck in
+    a transient state if the side LED affected anything else."""
+    if _leds is None:
+        return
+    try:
+        from adp8866 import flash
+        flash(_leds, side, color, duration_sec=duration)
+    except Exception as e:
+        log.warning(f"led_flash_side: {e}")
+
+
+# ── Health probe ─────────────────────────────────────────────────────────────
 
 def _systemctl_active(unit: str) -> bool:
     try:
@@ -112,6 +171,11 @@ def status_snapshot() -> dict:
         "panel_daemon":  True,
         "sensors_last_scan": _journal_recent_scan_count(),
     }
+
+
+def is_system_healthy(snap: dict) -> bool:
+    """Heuristic: BLE daemon up AND scans happening recently."""
+    return bool(snap.get("ble_daemon")) and snap.get("sensors_last_scan", 0) > 0
 
 
 # ── Button click pattern detection ───────────────────────────────────────────
@@ -183,7 +247,8 @@ class ButtonHandler:
 # ── Button-triggered actions ─────────────────────────────────────────────────
 
 def action_log_status():
-    """Single click — log a status snapshot to journald."""
+    """Single click — log a status snapshot to journald, flash LEFT side LED."""
+    led_flash_side("left", color=(50, 50, 50))
     snap = status_snapshot()
     log.info(
         f"STATUS  ble={snap['ble_daemon']}  cam={snap['camera_daemon']}  "
@@ -192,14 +257,25 @@ def action_log_status():
 
 
 def action_force_upload():
-    """Double click — placeholder. Full implementation needs IPC into
-    beekeeper-hub-py to trigger an immediate upload."""
+    """Double click — placeholder. Flash RIGHT side LED so the user sees the
+    click was registered. Full implementation needs IPC into beekeeper-hub-py
+    to trigger an immediate upload."""
+    led_flash_side("right", color=(0, 50, 80))
     log.info("force-upload requested (not yet wired into hub-py)")
 
 
 def action_restart_hub():
-    """Long press — graceful restart of the BLE ingestion daemon. Requires
-    sudoers entry (see ./sudoers.d/beekeeper-panel)."""
+    """Long press — graceful restart of the BLE ingestion daemon. Flashes
+    BOTH side LEDs amber. Requires sudoers entry (see ./sudoers.d/beekeeper-panel)."""
+    if _leds is not None:
+        try:
+            _leds.amber("left", brightness=80)
+            _leds.amber("right", brightness=80)
+            time.sleep(0.4)
+            _leds.off("left")
+            _leds.off("right")
+        except Exception as e:
+            log.warning(f"led restart-feedback: {e}")
     log.warning("button: restarting beekeeper-hub-py")
     try:
         r = subprocess.run(
@@ -215,6 +291,15 @@ def action_restart_hub():
 
 
 def action_reprovision_mode():
+    """Very-long press — reprovision mode placeholder. Pulses BLUE on both
+    sides so the user sees the mode was triggered."""
+    if _leds is not None:
+        try:
+            from adp8866 import pulse
+            pulse(_leds, "left",  color=(0, 0, 90), cycles=2, period_sec=0.6)
+            pulse(_leds, "right", color=(0, 0, 90), cycles=2, period_sec=0.6)
+        except Exception as e:
+            log.warning(f"led reprovision-feedback: {e}")
     log.info("very-long press — reprovision mode placeholder (not implemented)")
 
 
@@ -238,7 +323,12 @@ def open_button():
 
 
 def run():
-    log.info("Starting M1 panel daemon (button-only — LED driver not yet built)")
+    log.info("Starting M1 panel daemon (button + LED status)")
+
+    # Bring up LEDs as the very first thing the user sees
+    init_leds()
+    led_state_startup()
+
     button = open_button()
     handler = ButtonHandler(
         on_single=action_log_status,
@@ -251,20 +341,45 @@ def run():
     if button:
         poll.register(button.fd, select.POLLIN)
 
-    last_health_log = 0.0
+    last_health_check = 0.0
+    last_health_state = None  # "healthy" | "error" | None
+
+    # Set initial state right after startup pulse
+    _initial_snap = status_snapshot()
+    if is_system_healthy(_initial_snap):
+        led_state_healthy()
+        last_health_state = "healthy"
+    else:
+        led_state_error()
+        last_health_state = "error"
+
     try:
         while True:
             now = time.monotonic()
 
-            # Periodic background log of system state — useful in journalctl
-            # so we can see panel daemon health without pressing the button.
-            if now - last_health_log > HEALTH_PROBE_SEC * 4:  # every ~60s
+            # Periodic health check — re-evaluate healthy/error state
+            if now - last_health_check > HEALTH_PROBE_SEC * 4:  # every ~60s
                 snap = status_snapshot()
+                healthy = is_system_healthy(snap)
+                new_state = "healthy" if healthy else "error"
+                if new_state != last_health_state:
+                    if healthy:
+                        led_state_healthy()
+                    else:
+                        led_state_error()
+                    log.info(f"health state: {last_health_state} → {new_state}")
+                    last_health_state = new_state
+                else:
+                    # keep the LED freshly painted in case anything bumped it
+                    if healthy:
+                        led_state_healthy()
+                    else:
+                        led_state_error()
+                last_health_check = now
                 log.debug(
                     f"health  ble={snap['ble_daemon']}  cam={snap['camera_daemon']}  "
                     f"sensors_last_scan={snap['sensors_last_scan']}"
                 )
-                last_health_log = now
 
             if button:
                 events = poll.poll(100)
@@ -286,6 +401,12 @@ def run():
 
     except KeyboardInterrupt:
         log.info("Shutting down panel daemon")
+    finally:
+        if _leds is not None:
+            try:
+                _leds.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
