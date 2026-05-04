@@ -1,14 +1,15 @@
 [Unit]
-Description=BeeKeeper M1 panel daemon (button + ADP8866 RGB LED status)
+Description=BeeKeeper M1 status LED daemon
 Documentation=https://github.com/Ropehawn/beekeeper/tree/main/hardware/tachyon-hub-py
-# Listens to the M1 enclosure user button on /dev/input/event2 (pmic_pwrkey
-# — the M1 button is wired in parallel with the Tachyon power button).
-# A logind drop-in disables HandlePowerKey so presses don't shut us down.
+# Drives the M1 carrier's RGB status LED over I²C via the ADP8866 chip at
+# 0x27 on /dev/i2c-1. Indicates Tachyon hub health (healthy / hub-down /
+# ble-down / stale-upload). Does NOT touch the M1 user button — that
+# button is hardwired in parallel with the SoM power-key path and has no
+# userspace event semantics on this hardware.
 #
-# Drives the three M1 RGB LEDs over I²C via the ADP8866 chip at 0x27 on
-# /dev/i2c-1. See ../ADP8866_NOTES.md for register-level gotchas
-# (especially the inverted PWR_SEL polarity on this carrier).
-After=network-online.target systemd-logind.service
+# See ../ADP8866_NOTES.md for register-level gotchas (especially the
+# inverted PWR_SEL polarity on this carrier).
+After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=600
 StartLimitBurst=5
@@ -17,9 +18,8 @@ StartLimitBurst=5
 Type=simple
 User=particle
 Group=particle
-# `input` group: read /dev/input/event* for the button.
-# `i2c`   group: drive the ADP8866 over /dev/i2c-1.
-SupplementaryGroups=input i2c
+# i2c group lets us drive the ADP8866 over /dev/i2c-1 without root.
+SupplementaryGroups=i2c
 WorkingDirectory=/home/particle/beekeeper-ai
 ExecStart=/home/particle/beekeeper-ai/bin/python m1_panel.py
 Restart=always
