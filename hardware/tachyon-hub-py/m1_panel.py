@@ -15,6 +15,8 @@ LED states (top LED only):
     stale_upload      → solid amber     (scans ok but no uploads recently)
 """
 
+from __future__ import annotations
+
 import logging
 import re
 import subprocess
