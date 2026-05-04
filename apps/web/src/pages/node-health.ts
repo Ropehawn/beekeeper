@@ -15,6 +15,16 @@ function fmt(value: number | null, decimals: number, unit: string): string | nul
   return `${value.toFixed(decimals)}\u202f${unit}`;
 }
 
+// Display-layer Celsius \u2192 Fahrenheit conversion.
+// The database keeps the canonical metric `temperature_c` (Celsius). We convert
+// to \u00b0F only at user-facing render time. Do not push this conversion into the
+// API or daemon \u2014 the wire/storage format stays SI.
+function fmtTempF(celsius: number | null, decimals: number): string | null {
+  if (celsius === null) return null;
+  const f = (celsius * 9) / 5 + 32;
+  return `${f.toFixed(decimals)}\u202f\u00b0F`;
+}
+
 function escAttr(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -92,7 +102,7 @@ function renderCard(item: NodeHealthItem): string {
   // ── Metric rows ──────────────────────────────────────────────────────────
   const rows: string[] = [];
 
-  const temp  = fmt(item.temperature_c, 1, '°C');
+  const temp  = fmtTempF(item.temperature_c, 1);
   const hum   = fmt(item.humidity_pct,  1, '%');
   const press = fmt(item.pressure_pa != null ? item.pressure_pa / 100 : null, 1, 'hPa');
   const audio = fmt(item.audio_rms_dbfs, 1, 'dBFS');
